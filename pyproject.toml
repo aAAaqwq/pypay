@@ -29,7 +29,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-examples = ["fastapi>=0.110", "uvicorn>=0.29"]
+examples = ["fastapi>=0.110", "uvicorn>=0.29", "segno>=1.6"]
 dev = [
   "pytest>=8",
   "pytest-asyncio>=0.23",
@@ -37,6 +37,7 @@ dev = [
   "pytest-cov>=5",
   "ruff>=0.5",
   "fastapi>=0.110",
+  "segno>=1.6",
 ]
 
 [tool.setuptools.packages.find]

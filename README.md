@@ -22,7 +22,9 @@ src/pypay/
     ├── wechat.py      # 微信 APIv3 Native（公钥模式）
     └── alipay.py      # 支付宝电脑网站支付
 examples/
-├── fastapi_app.py     # 下单、回调、查单补偿示例
+├── fastapi_app.py     # 下单、回调、查单补偿、前端验证台
+├── demo_gateway.py    # 无商户凭据时的内存演示网关
+├── static/index.html  # 无构建步骤的本地验证页面
 ├── db.py              # SQLite + 唯一约束 + 事务幂等
 ├── reconcile.py       # 扫描待支付订单并主动查单
 └── minimal.py         # 最小同步调用
@@ -104,9 +106,9 @@ client = PaymentClient.from_env()  # 读取 PYPAY_CHANNEL
 result = client.create_payment(
     CreatePaymentRequest(
         out_trade_no="ORDER-20261027-001",
-        amount_fen=1,                 # 单位：分
+        amount_fen=1,  # 单位：分
         description="单次购买",
-        expires_at=None,              # 可选，必须带时区
+        expires_at=None,  # 可选，必须带时区
     )
 )
 
@@ -245,9 +247,17 @@ notification.assert_matches(
 - SQLite 事务 + 唯一约束实现幂等：重复回调不会重复发货。
 - 回调金额、渠道、订单号校验。
 - 主动查单补偿。
-- 退款通知累计退款金额。
+- 退款先到/支付后到、退款去重与累计。
+- 自带一个无构建步骤的前端验证台。
 
-运行：
+运行（无商户凭据的 UI 验证）：
+
+```bash
+PYPAY_DEMO_MODE=1 .venv/bin/uvicorn --factory examples.fastapi_app:create_app --reload
+# 打开 http://127.0.0.1:8000/
+```
+
+运行（真实商户配置）：
 
 ```bash
 set -a; source .env; set +a
@@ -264,11 +274,14 @@ uv run --env-file .env uvicorn --factory examples.fastapi_app:create_app --reloa
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
+| `GET` | `/` | 本地验证页面 |
+| `GET` | `/qr.svg?data=...` | 服务端生成二维码 SVG |
 | `POST` | `/orders` | 创建订单并下单 |
 | `GET` | `/orders/{out_trade_no}` | 查询本地订单 |
 | `POST` | `/orders/{out_trade_no}/sync` | 主动查单补偿 |
 | `POST` | `/notify/wechat` | 微信回调 |
 | `POST` | `/notify/alipay` | 支付宝回调 |
+| `POST` | `/demo/pay/{out_trade_no}` | 仅演示模式：模拟支付成功 |
 | `GET` | `/return/alipay` | 支付宝同步跳转展示页 |
 | `GET` | `/health` | 健康检查 |
 
@@ -280,13 +293,15 @@ uv run --env-file .env uvicorn --factory examples.fastapi_app:create_app --reloa
 
 - `orders.out_trade_no` 主键。
 - `notifications(channel, notification_id)` 唯一约束。
+- `notifications(channel, out_refund_no)` 部分唯一索引，防止同一退款换通知 ID 重复累计。
 
 处理回调时在同一个事务中：
 
 1. 插入通知记录；唯一约束冲突说明是重复回调，直接返回成功。
 2. 按 `out_trade_no` 读取订单，校验渠道和金额。
-3. 只有 `status NOT IN ('paid', 'refunded')` 时才更新为已支付并写 `fulfilled_at`。
-4. 任何校验失败都会回滚，包括通知记录的插入。
+3. 支付成功通知将订单更新为 `paid`；如果此前已收到全额退款则保持 `refunded` 且不发货，部分退款则正常记 `fulfilled_at`。
+4. 退款通知先到也不会丢：微信按单笔增量累计，支付宝按累计值取最大值，并限制不超过订单金额。
+5. 任何校验失败都会回滚，包括通知记录的插入。
 
 这样即使渠道重复投递或并发投递，发货动作只会发生一次。
 
@@ -299,6 +314,26 @@ uv run --env-file .env uvicorn --factory examples.fastapi_app:create_app --reloa
 ```
 
 单笔补偿也可以直接调用 `POST /orders/{out_trade_no}/sync`。查单成功且金额一致时才更新本地订单。
+
+## 前端验证台
+
+访问 `http://127.0.0.1:8000/` 可以看到一个无构建步骤的本地验证页面：
+
+- 选择微信支付或支付宝，输入元金额和商品描述。
+- 微信返回 Native 二维码，页面通过 `/qr.svg` 在本地生成二维码。
+- 支付宝返回电脑网站收银台表单，可点击“打开支付宝收银台”在新窗口提交。
+- 展示订单状态、渠道单号、退款金额和状态时间线。
+- “主动查单”调用 `POST /orders/{out_trade_no}/sync`。
+- 演示模式下额外提供“模拟支付成功”，用于验证订单更新和发货链路。
+
+**演示模式**通过 `PYPAY_DEMO_MODE=1` 启用，使用内存网关，不访问微信/支付宝，也不发起真实支付。该模式会绕过回调验签，**只能用于本地验证，生产环境必须关闭**。
+
+**真实模式**需要配置 `.env` 中的商户凭据。微信 Native 二维码可以被微信扫码；支付宝会打开真实收银台。注意：
+
+- 微信/支付宝的回调地址必须是渠道可访问的 **公网 HTTPS 地址**；`127.0.0.1` 不能被渠道回调，真实联调请使用隧道或测试域名。
+- 真实模式下页面只负责创建订单和展示；支付结果仍以可信回调或主动查单为准。
+
+二维码由 `segno` 在服务端生成，不依赖外部 CDN；安装 `.[examples]` 即可。
 
 ## 接入其他项目
 
@@ -319,6 +354,7 @@ uv run --env-file .env uvicorn --factory examples.fastapi_app:create_app --reloa
 - [x] 回调处理使用数据库事务和唯一约束；退款通知按 `out_refund_no` 去重。
 - [x] 超时不判定为失败，要求按原单号查询。
 - [x] 示例限制通知请求体为 256 KiB。
+- [x] 演示模式默认关闭；生产环境必须保持 `PYPAY_DEMO_MODE=0`。
 - [ ] 生产环境仍需配置 HTTPS、限流、告警、密钥轮换和反向代理层的请求体限制。
 - [ ] `notify_url` / `return_url` 必须来自服务端配置，不要接受用户输入；多租户场景应使用域名白名单，避免把签名订单数据发到第三方或形成支付后开放跳转。
 
@@ -344,6 +380,7 @@ uv run --env-file .env uvicorn --factory examples.fastapi_app:create_app --reloa
 - FastAPI 示例的下单、回调幂等、主动查单补偿、退款先到/支付后到、退款去重。
 - PKCS#1/PKCS#8/无头 base64 密钥规范化，以及支付宝 SPKI 公钥验签。
 - 真实签名/加密链路的端到端测试（微信与支付宝各一条）。
+- 前端验证台页面、二维码 SVG、演示模式下单/模拟支付。
 
 **待真实商户联调项**：
 
@@ -364,7 +401,8 @@ uv run --env-file .env uvicorn --factory examples.fastapi_app:create_app --reloa
 - 示例的 `reconcile.py` 只扫描 `pending` 订单；已支付订单上的退款漏通知需要通过退款单记录和 `query_refund` 单独对账。
 - `PaymentClient` 绑定单一渠道和单一商户账户；多渠道请分别创建客户端。
 - 示例使用 SQLite，生产环境应替换为项目自己的数据库和事务方案。
-- 示例 `/orders` 没有登录、权限和限流；生产环境必须在业务层补齐。
+- 示例 `/orders` 和前端验证台没有登录、权限和限流；生产环境必须在业务层补齐，或不要暴露该页面。
+- 演示模式绕过验签，仅用于本地 UI/流程验证，不能用于任何真实收款场景。
 - 示例允许客户端传入 `out_trade_no`；生产环境建议由服务端生成，避免订单号被猜测或复用。
 
 ## License

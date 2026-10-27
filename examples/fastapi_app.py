@@ -9,13 +9,14 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, Response
 from pydantic import BaseModel, Field
 
 from pypay import (
     AsyncPaymentClient,
     Channel,
     CreatePaymentRequest,
+    NotificationEvent,
     PaymentConfigError,
     PaymentError,
     PaymentNetworkError,
@@ -29,10 +30,13 @@ from pypay import (
 from pypay.base import AsyncPaymentGateway
 
 from .db import AmountMismatch, ChannelMismatch, Database, Order, OrderExists, OrderNotFound
+from .demo_gateway import demo_gateways
 
 logger = logging.getLogger("pypay.example")
 
 MAX_NOTIFICATION_BODY_BYTES = 256 * 1024
+MAX_QR_DATA_LENGTH = 2048
+STATIC_DIR = Path(__file__).with_name("static")
 
 
 class CreateOrderIn(BaseModel):
@@ -102,8 +106,20 @@ def gateways_from_env() -> dict[Channel, AsyncPaymentGateway]:
 def create_app(
     gateways: Mapping[Channel, AsyncPaymentGateway] | None = None,
     db_path: str | Path = "pypay_demo.db",
+    demo_mode: bool | None = None,
 ) -> FastAPI:
-    resolved = dict(gateways) if gateways is not None else gateways_from_env()
+    if demo_mode is None:
+        demo_mode = os.environ.get("PYPAY_DEMO_MODE", "").lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+    if demo_mode:
+        resolved = dict(demo_gateways())
+        logger.warning("pypay demo mode is enabled; no real payments will be created")
+    else:
+        resolved = dict(gateways) if gateways is not None else gateways_from_env()
     if not resolved:
         raise PaymentConfigError("at least one payment channel must be configured")
 
@@ -114,10 +130,38 @@ def create_app(
     app = FastAPI(title="pypay demo", version="0.1.0")
     app.state.gateways = resolved
     app.state.db = database
+    app.state.demo_mode = demo_mode
+
+    @app.get("/", include_in_schema=False)
+    async def index() -> FileResponse:
+        return FileResponse(STATIC_DIR / "index.html")
+
+    @app.get("/qr.svg", include_in_schema=False)
+    async def qr_svg(data: str) -> Response:
+        if not data or len(data) > MAX_QR_DATA_LENGTH:
+            raise HTTPException(status_code=400, detail="invalid QR data")
+        try:
+            import segno
+        except ImportError as exc:
+            raise HTTPException(
+                status_code=503, detail="install pypay[examples] for QR rendering"
+            ) from exc
+        svg = segno.make(data, error="m").svg_inline(scale=4)
+        if "xmlns=" not in svg:
+            svg = svg.replace("<svg ", '<svg xmlns="http://www.w3.org/2000/svg" ', 1)
+        return Response(
+            content=svg,
+            media_type="image/svg+xml",
+            headers={"Cache-Control": "no-store"},
+        )
 
     @app.get("/health")
     async def health() -> dict[str, object]:
-        return {"status": "ok", "channels": sorted(c.value for c in resolved)}
+        return {
+            "status": "ok",
+            "channels": sorted(c.value for c in resolved),
+            "demo": demo_mode,
+        }
 
     @app.post("/orders", response_model=CreateOrderOut, status_code=201)
     async def create_order(payload: CreateOrderIn, request: Request) -> CreateOrderOut:
@@ -305,6 +349,28 @@ def create_app(
             "<h1>支付结果待确认</h1>"
             "<p>请以支付宝异步通知或服务器主动查单结果为准，浏览器跳转不作为支付依据。</p>"
         )
+
+    @app.post("/demo/pay/{out_trade_no}", response_model=OrderOut, include_in_schema=False)
+    async def demo_pay(out_trade_no: str, request: Request) -> OrderOut:
+        if not request.app.state.demo_mode:
+            raise HTTPException(status_code=404, detail="demo mode is disabled")
+        order = await _require_order(request, out_trade_no)
+        if order.status != "pending":
+            return OrderOut.from_order(order)
+        notification = PaymentNotification(
+            channel=Channel(order.channel),
+            event_type=NotificationEvent.PAYMENT_SUCCEEDED,
+            notification_id=f"DEMO-{secrets.token_hex(8)}",
+            out_trade_no=out_trade_no,
+            amount_fen=order.amount_fen,
+            currency="CNY",
+            status=PaymentStatus.PAID,
+            transaction_id=f"DEMO-{secrets.token_hex(8).upper()}",
+            occurred_at=datetime.now(timezone.utc),
+        )
+        await _apply_notification(request, notification)
+        refreshed = await _require_order(request, out_trade_no)
+        return OrderOut.from_order(refreshed)
 
     return app
 

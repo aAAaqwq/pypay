@@ -455,7 +455,7 @@ def test_health_and_return_page(tmp_path: Path) -> None:
     client = new_client(tmp_path, FakeGateway(Channel.WECHAT))
     health = client.get("/health")
     assert health.status_code == 200
-    assert health.json() == {"status": "ok", "channels": ["wechat"]}
+    assert health.json() == {"status": "ok", "channels": ["wechat"], "demo": False}
     page = client.get("/return/alipay")
     assert page.status_code == 200
     assert "异步通知" in page.text
@@ -685,3 +685,65 @@ def test_alipay_cumulative_refund_is_not_added_twice(tmp_path: Path) -> None:
     order = client.get(f"/orders/{order_no}").json()
     assert order["refunded_amount_fen"] == 60
     assert order["status"] == "paid"
+
+
+def test_frontend_page_and_qr(tmp_path: Path) -> None:
+    client = new_client(tmp_path, FakeGateway(Channel.WECHAT))
+    page = client.get("/")
+    assert page.status_code == 200
+    assert "pypay" in page.text
+    assert "创建一笔测试支付" in page.text
+    assert "/qr.svg" in page.text
+
+    qr = client.get("/qr.svg", params={"data": "weixin://wxpay/bizpayurl?pr=test"})
+    assert qr.status_code == 200
+    assert qr.headers["content-type"].startswith("image/svg+xml")
+    assert "<svg" in qr.text
+    assert 'xmlns="http://www.w3.org/2000/svg"' in qr.text
+
+    too_long = client.get("/qr.svg", params={"data": "x" * 2049})
+    assert too_long.status_code == 400
+
+
+def test_demo_mode_end_to_end(tmp_path: Path) -> None:
+    app = create_app(demo_mode=True, db_path=tmp_path / "demo.db")
+    client = TestClient(app)
+
+    health = client.get("/health").json()
+    assert health == {"status": "ok", "channels": ["alipay", "wechat"], "demo": True}
+
+    created = client.post(
+        "/orders",
+        json={"amount_fen": 100, "description": "demo wechat", "channel": "wechat"},
+    )
+    assert created.status_code == 201
+    body = created.json()
+    assert body["qr_code_url"].startswith("weixin://")
+
+    paid = client.post(f"/demo/pay/{body['out_trade_no']}")
+    assert paid.status_code == 200
+    assert paid.json()["status"] == "paid"
+    assert paid.json()["transaction_id"].startswith("DEMO-")
+    assert paid.json()["fulfilled_at"] is not None
+
+    alipay = client.post(
+        "/orders",
+        json={"amount_fen": 250, "description": "demo alipay", "channel": "alipay"},
+    )
+    assert alipay.status_code == 201
+    assert "DEMO" in alipay.json()["form_html"]
+
+
+def test_demo_pay_is_disabled_in_real_mode(tmp_path: Path) -> None:
+    client = new_client(tmp_path, FakeGateway(Channel.WECHAT))
+    response = client.post("/demo/pay/ORDER1")
+    assert response.status_code == 404
+
+
+def test_demo_mode_can_be_enabled_by_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("PYPAY_DEMO_MODE", "1")
+    app = create_app(db_path=tmp_path / "demo.db")
+    client = TestClient(app)
+    assert client.get("/health").json()["demo"] is True
