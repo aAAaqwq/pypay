@@ -27,11 +27,16 @@ CREATE TABLE IF NOT EXISTS notifications (
     notification_id TEXT NOT NULL,
     event_type TEXT NOT NULL,
     out_trade_no TEXT NOT NULL,
+    out_refund_no TEXT,
     received_at TEXT NOT NULL,
     UNIQUE (channel, notification_id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_orders_status ON orders (status);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_notifications_refund
+ON notifications (channel, out_refund_no)
+WHERE out_refund_no IS NOT NULL;
 """
 
 
@@ -107,7 +112,9 @@ class Database:
                     (out_trade_no, channel, amount_fen, description, _now()),
                 )
         except sqlite3.IntegrityError as exc:
-            raise OrderExists(out_trade_no) from exc
+            if "orders.out_trade_no" in str(exc):
+                raise OrderExists(out_trade_no) from exc
+            raise
 
     def get_order(self, out_trade_no: str) -> Order | None:
         with self._connection() as conn:
@@ -129,14 +136,15 @@ class Database:
                 conn.execute(
                     """
                     INSERT INTO notifications
-                        (channel, notification_id, event_type, out_trade_no, received_at)
-                    VALUES (?, ?, ?, ?, ?)
+                        (channel, notification_id, event_type, out_trade_no, out_refund_no, received_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
                     """,
                     (
                         notification.channel.value,
                         notification.notification_id,
                         notification.event_type.value,
                         notification.out_trade_no,
+                        notification.out_refund_no,
                         _now(),
                     ),
                 )
@@ -144,7 +152,10 @@ class Database:
                 return ApplyResult(duplicate=True, newly_paid=False)
 
             row = conn.execute(
-                "SELECT channel, amount_fen, status FROM orders WHERE out_trade_no = ?",
+                """
+                SELECT channel, amount_fen, status, refunded_amount_fen
+                FROM orders WHERE out_trade_no = ?
+                """,
                 (notification.out_trade_no,),
             ).fetchone()
             if row is None:
@@ -155,15 +166,24 @@ class Database:
                 raise AmountMismatch(notification.out_trade_no)
 
             if notification.event_type is NotificationEvent.PAYMENT_SUCCEEDED:
-                cursor = conn.execute(
+                newly_paid = (
+                    row["status"] != "paid" and row["refunded_amount_fen"] < row["amount_fen"]
+                )
+                conn.execute(
                     """
                     UPDATE orders
-                    SET status = 'paid',
+                    SET status = CASE
+                            WHEN refunded_amount_fen >= amount_fen THEN 'refunded'
+                            ELSE 'paid'
+                        END,
                         transaction_id = ?,
                         paid_at = ?,
-                        fulfilled_at = COALESCE(fulfilled_at, ?)
-                    WHERE out_trade_no = ?
-                      AND status NOT IN ('paid', 'refunded')
+                        fulfilled_at = CASE
+                            WHEN refunded_amount_fen < amount_fen
+                                THEN COALESCE(fulfilled_at, ?)
+                            ELSE fulfilled_at
+                        END
+                    WHERE out_trade_no = ? AND status != 'paid'
                     """,
                     (
                         notification.transaction_id,
@@ -174,7 +194,7 @@ class Database:
                         notification.out_trade_no,
                     ),
                 )
-                return ApplyResult(duplicate=False, newly_paid=cursor.rowcount == 1)
+                return ApplyResult(duplicate=False, newly_paid=newly_paid)
 
             if notification.event_type is NotificationEvent.PAYMENT_CLOSED:
                 conn.execute(
@@ -194,23 +214,48 @@ class Database:
                 notification.event_type is NotificationEvent.REFUND_SUCCEEDED
                 and notification.refund_amount_fen
             ):
-                conn.execute(
-                    """
-                    UPDATE orders
-                    SET refunded_amount_fen = refunded_amount_fen + ?,
-                        status = CASE
-                            WHEN refunded_amount_fen + ? >= amount_fen THEN 'refunded'
-                            ELSE status
-                        END
-                    WHERE out_trade_no = ?
-                      AND status IN ('paid', 'refunded')
-                    """,
-                    (
-                        notification.refund_amount_fen,
-                        notification.refund_amount_fen,
-                        notification.out_trade_no,
-                    ),
-                )
+                if notification.out_refund_no:
+                    # WeChat refund notifications are per-refund and incremental.
+                    conn.execute(
+                        """
+                        UPDATE orders
+                        SET refunded_amount_fen = MIN(
+                                amount_fen, refunded_amount_fen + ?
+                            ),
+                            status = CASE
+                                WHEN MIN(amount_fen, refunded_amount_fen + ?) >= amount_fen
+                                    THEN 'refunded'
+                                ELSE status
+                            END
+                        WHERE out_trade_no = ?
+                        """,
+                        (
+                            notification.refund_amount_fen,
+                            notification.refund_amount_fen,
+                            notification.out_trade_no,
+                        ),
+                    )
+                else:
+                    # Alipay trade notifications report a running refunded total.
+                    conn.execute(
+                        """
+                        UPDATE orders
+                        SET refunded_amount_fen = MIN(
+                                amount_fen, MAX(refunded_amount_fen, ?)
+                            ),
+                            status = CASE
+                                WHEN MAX(refunded_amount_fen, ?) >= amount_fen
+                                    THEN 'refunded'
+                                ELSE status
+                            END
+                        WHERE out_trade_no = ?
+                        """,
+                        (
+                            notification.refund_amount_fen,
+                            notification.refund_amount_fen,
+                            notification.out_trade_no,
+                        ),
+                    )
                 return ApplyResult(duplicate=False, newly_paid=False)
 
             return ApplyResult(duplicate=False, newly_paid=False, ignored=True)
@@ -220,25 +265,36 @@ class Database:
     ) -> bool:
         with self._connection() as conn:
             row = conn.execute(
-                "SELECT amount_fen FROM orders WHERE out_trade_no = ?", (out_trade_no,)
+                """
+                SELECT amount_fen, status, refunded_amount_fen
+                FROM orders WHERE out_trade_no = ?
+                """,
+                (out_trade_no,),
             ).fetchone()
             if row is None:
                 raise OrderNotFound(out_trade_no)
             if amount_fen != row["amount_fen"]:
                 raise AmountMismatch(out_trade_no)
-            cursor = conn.execute(
+            newly_paid = row["status"] != "paid" and row["refunded_amount_fen"] < row["amount_fen"]
+            conn.execute(
                 """
                 UPDATE orders
-                SET status = 'paid',
+                SET status = CASE
+                        WHEN refunded_amount_fen >= amount_fen THEN 'refunded'
+                        ELSE 'paid'
+                    END,
                     transaction_id = COALESCE(?, transaction_id),
                     paid_at = COALESCE(?, ?),
-                    fulfilled_at = COALESCE(fulfilled_at, ?)
-                WHERE out_trade_no = ?
-                  AND status NOT IN ('paid', 'refunded')
+                    fulfilled_at = CASE
+                        WHEN refunded_amount_fen < amount_fen
+                            THEN COALESCE(fulfilled_at, ?)
+                        ELSE fulfilled_at
+                    END
+                WHERE out_trade_no = ? AND status != 'paid'
                 """,
                 (transaction_id, paid_at, _now(), _now(), out_trade_no),
             )
-            return cursor.rowcount == 1
+            return newly_paid
 
     def mark_closed_from_query(self, out_trade_no: str) -> bool:
         with self._connection() as conn:
@@ -257,12 +313,14 @@ class Database:
             return cursor.rowcount == 1
 
     def mark_refunded_from_query(self, out_trade_no: str) -> bool:
+        # A payment query can say "refunded" without saying whether the refund
+        # was partial. Leave the amount to refund notifications/query_refund.
         with self._connection() as conn:
             cursor = conn.execute(
                 """
                 UPDATE orders
-                SET status = 'refunded', refunded_amount_fen = amount_fen
-                WHERE out_trade_no = ? AND status IN ('paid', 'refunded')
+                SET status = 'refunded'
+                WHERE out_trade_no = ? AND status IN ('pending', 'paid', 'refunded')
                 """,
                 (out_trade_no,),
             )

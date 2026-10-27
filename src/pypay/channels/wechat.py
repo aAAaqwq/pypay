@@ -1,5 +1,4 @@
 import json
-import re
 from collections.abc import Mapping
 from datetime import datetime
 from typing import Any
@@ -11,6 +10,7 @@ from wechatpayv3 import WeChatPay, WeChatPayType
 from ..config import WeChatPayConfig
 from ..enums import Channel, NotificationEvent, PaymentStatus, RefundStatus
 from ..errors import (
+    PaymentConfigError,
     PaymentNetworkError,
     PaymentNotFoundError,
     PaymentProviderError,
@@ -26,10 +26,10 @@ from ..models import (
     QueryRefundResult,
     RefundRequest,
     RefundResult,
+    validate_out_refund_no,
+    validate_out_trade_no,
 )
 
-_OUT_TRADE_NO_RE = re.compile(r"^[0-9A-Za-z_\-|*@]{1,32}$")
-_OUT_REFUND_NO_RE = re.compile(r"^[0-9A-Za-z_\-|*@]{1,64}$")
 _NOT_FOUND_CODES = {"ORDER_NOT_EXIST", "RESOURCE_NOT_EXIST", "RESOURCE_NOT_EXISTS"}
 _TRADE_STATE_MAP = {
     "SUCCESS": PaymentStatus.PAID,
@@ -46,20 +46,6 @@ _REFUND_STATUS_MAP = {
     "CLOSED": RefundStatus.CLOSED,
     "ABNORMAL": RefundStatus.FAILED,
 }
-
-
-def _validate_out_trade_no(value: str) -> None:
-    if not _OUT_TRADE_NO_RE.fullmatch(value):
-        raise PaymentValidationError(
-            "out_trade_no must contain only digits, letters, _ - | * @ and be at most 32 characters"
-        )
-
-
-def _validate_out_refund_no(value: str) -> None:
-    if not _OUT_REFUND_NO_RE.fullmatch(value):
-        raise PaymentValidationError(
-            "out_refund_no must contain only digits, letters, _ - | * @ and be at most 64 characters"
-        )
 
 
 def _parse_time(value: object) -> datetime | None:
@@ -112,6 +98,8 @@ class WeChatChannel:
             raise PaymentNetworkError(
                 "WeChat Pay network error; query by out_trade_no before treating it as failed"
             ) from exc
+        except (TypeError, AttributeError):
+            raise
         except Exception as exc:
             message = str(exc)
             if (
@@ -121,7 +109,13 @@ class WeChatChannel:
                 raise PaymentSignatureError(
                     "WeChat Pay response signature verification failed"
                 ) from exc
-            raise PaymentProviderError(message or "WeChat Pay request failed") from exc
+            if "failed to load" in message:
+                raise PaymentConfigError("WeChat Pay SDK could not load a key") from exc
+            if "is not assigned" in message:
+                raise PaymentValidationError(
+                    "WeChat Pay SDK rejected an incomplete request"
+                ) from exc
+            raise PaymentProviderError("WeChat Pay request failed") from exc
 
     def _decode(self, text: Any) -> dict[str, Any]:
         if not text:
@@ -153,7 +147,7 @@ class WeChatChannel:
         )
 
     def create_payment(self, request: CreatePaymentRequest) -> CreatePaymentResult:
-        _validate_out_trade_no(request.out_trade_no)
+        validate_out_trade_no(request.out_trade_no)
         kwargs: dict[str, Any] = {
             "description": request.description,
             "out_trade_no": request.out_trade_no,
@@ -181,7 +175,7 @@ class WeChatChannel:
         )
 
     def query_payment(self, out_trade_no: str) -> QueryPaymentResult:
-        _validate_out_trade_no(out_trade_no)
+        validate_out_trade_no(out_trade_no)
         status, text = self._call(self._sdk.query, out_trade_no=out_trade_no)
         data = self._decode(text)
         self._raise_for_status(status, data)
@@ -193,6 +187,10 @@ class WeChatChannel:
         returned_order = data.get("out_trade_no")
         if returned_order != expected_out_trade_no:
             raise PaymentProviderError("WeChat Pay returned a mismatched out_trade_no")
+        if data.get("mchid") != self._config.mchid:
+            raise PaymentProviderError("WeChat Pay returned a mismatched mchid")
+        if data.get("appid") != self._config.appid:
+            raise PaymentProviderError("WeChat Pay returned a mismatched appid")
         amount = data.get("amount")
         if not isinstance(amount, Mapping):
             raise PaymentProviderError("WeChat Pay response is missing amount")
@@ -212,7 +210,7 @@ class WeChatChannel:
         )
 
     def close_payment(self, out_trade_no: str) -> ClosePaymentResult:
-        _validate_out_trade_no(out_trade_no)
+        validate_out_trade_no(out_trade_no)
         status, text = self._call(self._sdk.close, out_trade_no=out_trade_no)
         data = self._decode(text)
         if 200 <= status < 300:
@@ -227,8 +225,8 @@ class WeChatChannel:
         raise PaymentProviderError("WeChat Pay close request failed")
 
     def refund(self, request: RefundRequest) -> RefundResult:
-        _validate_out_trade_no(request.out_trade_no)
-        _validate_out_refund_no(request.out_refund_no)
+        validate_out_trade_no(request.out_trade_no)
+        validate_out_refund_no(request.out_refund_no)
         kwargs: dict[str, Any] = {
             "out_refund_no": request.out_refund_no,
             "out_trade_no": request.out_trade_no,
@@ -271,7 +269,7 @@ class WeChatChannel:
     def query_refund(
         self, out_refund_no: str, out_trade_no: str | None = None
     ) -> QueryRefundResult:
-        _validate_out_refund_no(out_refund_no)
+        validate_out_refund_no(out_refund_no)
         status, text = self._call(self._sdk.query_refund, out_refund_no=out_refund_no)
         data = self._decode(text)
         self._raise_for_status(status, data)
@@ -390,7 +388,11 @@ class WeChatChannel:
             raise PaymentValidationError("WeChat Pay refund notification is missing out_trade_no")
         if not isinstance(out_refund_no, str) or not out_refund_no:
             raise PaymentValidationError("WeChat Pay refund notification is missing out_refund_no")
-        status = PaymentStatus.REFUNDED if refund == total else PaymentStatus.PAID
+        status = (
+            PaymentStatus.REFUNDED
+            if event is NotificationEvent.REFUND_SUCCEEDED and refund == total
+            else PaymentStatus.PAID
+        )
         return PaymentNotification(
             channel=self.channel,
             event_type=event,

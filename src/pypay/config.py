@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlparse
 
+from cryptography.exceptions import UnsupportedAlgorithm
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
@@ -15,28 +16,60 @@ DEFAULT_ALIPAY_TIMEOUT = 10.0
 DEFAULT_ALIPAY_GATEWAY = "https://openapi.alipay.com/gateway.do"
 
 
+def _pem_candidates(value: str, markers: tuple[str, ...]) -> list[str]:
+    if "-----BEGIN" in value:
+        return [value]
+    body = value.strip()
+    return [f"-----BEGIN {marker}-----\n{body}\n-----END {marker}-----" for marker in markers]
+
+
 def _load_private_key(value: str, label: str) -> rsa.RSAPrivateKey:
     if not isinstance(value, str) or not value.strip():
         raise PaymentConfigError(f"{label} is required")
-    try:
-        key = serialization.load_pem_private_key(value.encode("utf-8"), password=None)
-    except Exception as exc:
-        raise PaymentConfigError(f"{label} is not a valid unencrypted PEM private key") from exc
-    if not isinstance(key, rsa.RSAPrivateKey):
-        raise PaymentConfigError(f"{label} must be an RSA private key")
-    return key
+    last_error: Exception | None = None
+    for candidate in _pem_candidates(value, ("PRIVATE KEY", "RSA PRIVATE KEY")):
+        try:
+            key = serialization.load_pem_private_key(candidate.encode("utf-8"), password=None)
+        except (ValueError, TypeError, UnsupportedAlgorithm) as exc:
+            last_error = exc
+            continue
+        if not isinstance(key, rsa.RSAPrivateKey):
+            raise PaymentConfigError(f"{label} must be an RSA private key")
+        return key
+    raise PaymentConfigError(f"{label} is not a valid unencrypted RSA private key") from last_error
 
 
 def _load_public_key(value: str, label: str) -> rsa.RSAPublicKey:
     if not isinstance(value, str) or not value.strip():
         raise PaymentConfigError(f"{label} is required")
-    try:
-        key = serialization.load_pem_public_key(value.encode("utf-8"))
-    except Exception as exc:
-        raise PaymentConfigError(f"{label} is not a valid PEM public key") from exc
-    if not isinstance(key, rsa.RSAPublicKey):
-        raise PaymentConfigError(f"{label} must be an RSA public key")
-    return key
+    last_error: Exception | None = None
+    for candidate in _pem_candidates(value, ("PUBLIC KEY", "RSA PUBLIC KEY")):
+        try:
+            key = serialization.load_pem_public_key(candidate.encode("utf-8"))
+        except (ValueError, TypeError, UnsupportedAlgorithm) as exc:
+            last_error = exc
+            continue
+        if not isinstance(key, rsa.RSAPublicKey):
+            raise PaymentConfigError(f"{label} must be an RSA public key")
+        return key
+    raise PaymentConfigError(f"{label} is not a valid RSA public key") from last_error
+
+
+def _normalize_private_key(value: str, label: str) -> str:
+    key = _load_private_key(value, label)
+    return key.private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.PKCS8,
+        serialization.NoEncryption(),
+    ).decode("utf-8")
+
+
+def _normalize_public_key(value: str, label: str) -> str:
+    key = _load_public_key(value, label)
+    return key.public_bytes(
+        serialization.Encoding.PEM,
+        serialization.PublicFormat.SubjectPublicKeyInfo,
+    ).decode("utf-8")
 
 
 def _require_text(value: str | None, label: str) -> str:
@@ -131,8 +164,10 @@ class WeChatPayConfig:
         _require_text(self.public_key_id, "public_key_id")
         if len(self.apiv3_key.encode("utf-8")) != 32:
             raise PaymentConfigError("apiv3_key must be exactly 32 bytes")
-        _load_private_key(self.private_key, "private_key")
-        _load_public_key(self.public_key, "public_key")
+        object.__setattr__(
+            self, "private_key", _normalize_private_key(self.private_key, "private_key")
+        )
+        object.__setattr__(self, "public_key", _normalize_public_key(self.public_key, "public_key"))
         _require_https_url(self.notify_url, "notify_url")
         object.__setattr__(self, "timeout", _require_positive_timeout(self.timeout, "timeout"))
 
@@ -171,11 +206,13 @@ class AlipayConfig:
 
     def __post_init__(self) -> None:
         _require_text(self.appid, "appid")
-        _load_private_key(self.private_key, "private_key")
-        _load_public_key(self.public_key, "public_key")
+        object.__setattr__(
+            self, "private_key", _normalize_private_key(self.private_key, "private_key")
+        )
+        object.__setattr__(self, "public_key", _normalize_public_key(self.public_key, "public_key"))
         _require_http_url(self.notify_url, "notify_url")
         _require_http_url(self.return_url, "return_url")
-        _require_http_url(self.gateway, "gateway")
+        _require_https_url(self.gateway, "gateway")
         if self.seller_id is not None:
             _require_text(self.seller_id, "seller_id")
         object.__setattr__(self, "timeout", _require_positive_timeout(self.timeout, "timeout"))

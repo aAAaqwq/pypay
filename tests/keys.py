@@ -20,6 +20,7 @@ class KeyPair:
     private_pem_pkcs8: str
     private_pem_pkcs1: str
     public_pem: str
+    public_pem_pkcs1: str
 
 
 def generate_keypair() -> KeyPair:
@@ -42,7 +43,17 @@ def generate_keypair() -> KeyPair:
             serialization.PublicFormat.SubjectPublicKeyInfo,
         )
         .decode(),
+        public_pem_pkcs1=key.public_key()
+        .public_bytes(
+            serialization.Encoding.PEM,
+            serialization.PublicFormat.PKCS1,
+        )
+        .decode(),
     )
+
+
+def pem_body(pem: str) -> str:
+    return "".join(line for line in pem.splitlines() if not line.startswith("-----"))
 
 
 def sign_sha256(private_key: rsa.RSAPrivateKey, message: bytes) -> str:

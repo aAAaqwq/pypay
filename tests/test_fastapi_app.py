@@ -110,6 +110,7 @@ def notification(
     event_type: NotificationEvent = NotificationEvent.PAYMENT_SUCCEEDED,
     status: PaymentStatus = PaymentStatus.PAID,
     refund_amount_fen: int | None = None,
+    out_refund_no: str | None = None,
 ) -> PaymentNotification:
     return PaymentNotification(
         channel=channel,
@@ -121,6 +122,7 @@ def notification(
         status=status,
         transaction_id=f"TX-{notification_id}",
         refund_amount_fen=refund_amount_fen,
+        out_refund_no=out_refund_no,
     )
 
 
@@ -187,13 +189,40 @@ def test_create_order_rejects_duplicate_out_trade_no(tmp_path: Path) -> None:
     assert response.status_code == 409
 
 
-def test_create_order_provider_failure_keeps_order_pending(tmp_path: Path) -> None:
+def test_create_order_provider_rejection_marks_order_failed(tmp_path: Path) -> None:
     gateway = FakeGateway(Channel.WECHAT, create_error=PaymentProviderError("boom"))
     client = new_client(tmp_path, gateway)
     response = client.post(
         "/orders", json={"amount_fen": 100, "description": "test", "channel": "wechat"}
     )
     assert response.status_code == 502
+    out_trade_no = response.json()["detail"]["out_trade_no"]
+    assert client.get(f"/orders/{out_trade_no}").json()["status"] == "failed"
+
+
+def test_create_order_provider_5xx_keeps_order_pending(tmp_path: Path) -> None:
+    gateway = FakeGateway(
+        Channel.WECHAT,
+        create_error=PaymentProviderError("gateway error", http_status=502),
+    )
+    client = new_client(tmp_path, gateway)
+    response = client.post(
+        "/orders", json={"amount_fen": 100, "description": "test", "channel": "wechat"}
+    )
+    assert response.status_code == 502
+    assert response.json()["detail"]["may_have_succeeded"] is True
+    out_trade_no = response.json()["detail"]["out_trade_no"]
+    assert client.get(f"/orders/{out_trade_no}").json()["status"] == "pending"
+
+
+def test_create_order_signature_failure_keeps_order_pending(tmp_path: Path) -> None:
+    gateway = FakeGateway(Channel.WECHAT, create_error=PaymentSignatureError("bad signature"))
+    client = new_client(tmp_path, gateway)
+    response = client.post(
+        "/orders", json={"amount_fen": 100, "description": "test", "channel": "wechat"}
+    )
+    assert response.status_code == 502
+    assert response.json()["detail"]["may_have_succeeded"] is True
     out_trade_no = response.json()["detail"]["out_trade_no"]
     assert client.get(f"/orders/{out_trade_no}").json()["status"] == "pending"
 
@@ -388,6 +417,7 @@ def test_refund_notifications_update_refunded_amount(tmp_path: Path) -> None:
         out_trade_no=order_no,
         event_type=NotificationEvent.REFUND_SUCCEEDED,
         refund_amount_fen=40,
+        out_refund_no="REF-1",
     )
     assert client.post("/notify/wechat", content=b"{}").status_code == 200
     partial = client.get(f"/orders/{order_no}").json()
@@ -400,6 +430,7 @@ def test_refund_notifications_update_refunded_amount(tmp_path: Path) -> None:
         out_trade_no=order_no,
         event_type=NotificationEvent.REFUND_SUCCEEDED,
         refund_amount_fen=60,
+        out_refund_no="REF-2",
     )
     assert client.post("/notify/wechat", content=b"{}").status_code == 200
     full = client.get(f"/orders/{order_no}").json()
@@ -478,3 +509,179 @@ def test_unknown_channel_in_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("PYPAY_CHANNELS", "stripe")
     with pytest.raises(PaymentConfigError):
         gateways_from_env()
+
+
+def test_partial_refund_before_payment_is_not_lost(tmp_path: Path) -> None:
+    gateway = FakeGateway(Channel.WECHAT)
+    client = new_client(tmp_path, gateway)
+    created = create_order(client)
+    order_no = created["out_trade_no"]
+
+    gateway.notification = notification(
+        Channel.WECHAT,
+        "refund-first",
+        out_trade_no=order_no,
+        event_type=NotificationEvent.REFUND_SUCCEEDED,
+        refund_amount_fen=40,
+        out_refund_no="REF-1",
+    )
+    assert client.post("/notify/wechat", content=b"{}").status_code == 200
+    pending = client.get(f"/orders/{order_no}").json()
+    assert pending["status"] == "pending"
+    assert pending["refunded_amount_fen"] == 40
+
+    gateway.notification = notification(
+        Channel.WECHAT, "payment-after-refund", out_trade_no=order_no
+    )
+    assert client.post("/notify/wechat", content=b"{}").status_code == 200
+    paid = client.get(f"/orders/{order_no}").json()
+    assert paid["status"] == "paid"
+    assert paid["refunded_amount_fen"] == 40
+    assert paid["fulfilled_at"] is not None
+
+
+def test_full_refund_before_payment_does_not_fulfill(tmp_path: Path) -> None:
+    gateway = FakeGateway(Channel.WECHAT)
+    client = new_client(tmp_path, gateway)
+    created = create_order(client)
+    order_no = created["out_trade_no"]
+
+    gateway.notification = notification(
+        Channel.WECHAT,
+        "refund-first",
+        out_trade_no=order_no,
+        event_type=NotificationEvent.REFUND_SUCCEEDED,
+        refund_amount_fen=100,
+        out_refund_no="REF-1",
+    )
+    assert client.post("/notify/wechat", content=b"{}").status_code == 200
+    refunded = client.get(f"/orders/{order_no}").json()
+    assert refunded["status"] == "refunded"
+    assert refunded["refunded_amount_fen"] == 100
+    assert refunded["fulfilled_at"] is None
+
+    gateway.notification = notification(
+        Channel.WECHAT, "payment-after-refund", out_trade_no=order_no
+    )
+    assert client.post("/notify/wechat", content=b"{}").status_code == 200
+    after = client.get(f"/orders/{order_no}").json()
+    assert after["status"] == "refunded"
+    assert after["transaction_id"] == "TX-payment-after-refund"
+    assert after["fulfilled_at"] is None
+
+
+def test_same_refund_with_different_notification_id_is_deduped(tmp_path: Path) -> None:
+    gateway = FakeGateway(Channel.WECHAT)
+    client = new_client(tmp_path, gateway)
+    created = create_order(client)
+    order_no = created["out_trade_no"]
+    gateway.notification = notification(Channel.WECHAT, "payment", out_trade_no=order_no)
+    assert client.post("/notify/wechat", content=b"{}").status_code == 200
+
+    for notification_id in ("refund-a", "refund-b"):
+        gateway.notification = notification(
+            Channel.WECHAT,
+            notification_id,
+            out_trade_no=order_no,
+            event_type=NotificationEvent.REFUND_SUCCEEDED,
+            refund_amount_fen=40,
+            out_refund_no="REF-1",
+        )
+        assert client.post("/notify/wechat", content=b"{}").status_code == 200
+
+    order = client.get(f"/orders/{order_no}").json()
+    assert order["refunded_amount_fen"] == 40
+
+
+def test_refund_query_does_not_invent_a_full_refund(tmp_path: Path) -> None:
+    gateway = FakeGateway(Channel.WECHAT)
+    client = new_client(tmp_path, gateway)
+    created = create_order(client)
+    order_no = created["out_trade_no"]
+    gateway.notification = notification(Channel.WECHAT, "payment", out_trade_no=order_no)
+    assert client.post("/notify/wechat", content=b"{}").status_code == 200
+    gateway.query_result = QueryPaymentResult(
+        channel=Channel.WECHAT,
+        out_trade_no=order_no,
+        amount_fen=100,
+        status=PaymentStatus.REFUNDED,
+    )
+    response = client.post(f"/orders/{order_no}/sync")
+    assert response.status_code == 200
+    assert response.json()["status"] == "refunded"
+    assert response.json()["refunded_amount_fen"] == 0
+
+
+@pytest.mark.parametrize("path", ["/notify/wechat", "/notify/alipay"])
+def test_notification_body_size_is_limited(tmp_path: Path, path: str) -> None:
+    client = new_client(tmp_path, FakeGateway(Channel.WECHAT), FakeGateway(Channel.ALIPAY))
+    response = client.post(path, content=b"x" * (256 * 1024 + 1))
+    assert response.status_code == 413
+
+
+def test_payment_failed_notification(tmp_path: Path) -> None:
+    gateway = FakeGateway(Channel.WECHAT)
+    client = new_client(tmp_path, gateway)
+    created = create_order(client)
+    gateway.notification = notification(
+        Channel.WECHAT,
+        "notify-1",
+        out_trade_no=created["out_trade_no"],
+        event_type=NotificationEvent.PAYMENT_FAILED,
+        status=PaymentStatus.FAILED,
+    )
+    assert client.post("/notify/wechat", content=b"{}").status_code == 200
+    assert client.get(f"/orders/{created['out_trade_no']}").json()["status"] == "failed"
+
+
+def test_alipay_notification_unknown_order(tmp_path: Path) -> None:
+    gateway = FakeGateway(Channel.ALIPAY)
+    client = new_client(tmp_path, gateway)
+    gateway.notification = notification(Channel.ALIPAY, "notify-1", out_trade_no="MISSING")
+    response = client.post("/notify/alipay", content=b"a=1")
+    assert response.status_code == 404
+    assert response.text == "failure"
+
+
+def test_wechat_refund_amount_is_clamped_to_order_total(tmp_path: Path) -> None:
+    gateway = FakeGateway(Channel.WECHAT)
+    client = new_client(tmp_path, gateway)
+    created = create_order(client)
+    order_no = created["out_trade_no"]
+    gateway.notification = notification(Channel.WECHAT, "payment", out_trade_no=order_no)
+    assert client.post("/notify/wechat", content=b"{}").status_code == 200
+    gateway.notification = notification(
+        Channel.WECHAT,
+        "refund-over",
+        out_trade_no=order_no,
+        event_type=NotificationEvent.REFUND_SUCCEEDED,
+        refund_amount_fen=200,
+        out_refund_no="REF-OVER",
+    )
+    assert client.post("/notify/wechat", content=b"{}").status_code == 200
+    order = client.get(f"/orders/{order_no}").json()
+    assert order["refunded_amount_fen"] == 100
+    assert order["status"] == "refunded"
+
+
+def test_alipay_cumulative_refund_is_not_added_twice(tmp_path: Path) -> None:
+    gateway = FakeGateway(Channel.ALIPAY)
+    client = new_client(tmp_path, gateway)
+    created = create_order(client, channel="alipay")
+    order_no = created["out_trade_no"]
+    gateway.notification = notification(Channel.ALIPAY, "payment", out_trade_no=order_no)
+    assert client.post("/notify/alipay", content=b"a=1").status_code == 200
+
+    for notification_id, refunded in (("refund-a", 40), ("refund-b", 60)):
+        gateway.notification = notification(
+            Channel.ALIPAY,
+            notification_id,
+            out_trade_no=order_no,
+            event_type=NotificationEvent.REFUND_SUCCEEDED,
+            refund_amount_fen=refunded,
+        )
+        assert client.post("/notify/alipay", content=b"a=1").status_code == 200
+
+    order = client.get(f"/orders/{order_no}").json()
+    assert order["refunded_amount_fen"] == 60
+    assert order["status"] == "paid"

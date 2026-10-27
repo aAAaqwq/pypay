@@ -61,7 +61,7 @@ cp .env.example .env
 - 微信：`PYPAY_WECHAT_PRIVATE_KEY_PATH`、`PYPAY_WECHAT_PUBLIC_KEY_PATH`
 - 支付宝：`PYPAY_ALIPAY_PRIVATE_KEY_PATH`、`PYPAY_ALIPAY_PUBLIC_KEY_PATH`
 
-也支持通过 `*_KEY` 环境变量传完整 PEM。同一组密钥的“文件路径”和“内联 PEM”只能设置一个，配置校验会明确报错。
+也支持通过 `*_KEY` 环境变量传完整 PEM。密钥可以是 PKCS#1、PKCS#8，或支付宝工具导出的无头 base64；配置会统一规范化为 PKCS#8 私钥和 SPKI 公钥，避免 SDK 因 PEM 头不匹配而验签失败。同一组密钥的“文件路径”和“内联 PEM”只能设置一个，配置校验会明确报错。
 
 ### 微信必填项
 
@@ -82,15 +82,15 @@ cp .env.example .env
 | --- | --- |
 | `PYPAY_ALIPAY_APPID` | 支付宝应用 appid |
 | `PYPAY_ALIPAY_PRIVATE_KEY(_PATH)` | 应用私钥，PKCS#1 或 PKCS#8 均可 |
-| `PYPAY_ALIPAY_PUBLIC_KEY(_PATH)` | 支付宝公钥 PEM |
+| `PYPAY_ALIPAY_PUBLIC_KEY(_PATH)` | 支付宝公钥，支持 PKCS#1/SPKI 或无头 base64 |
 | `PYPAY_ALIPAY_NOTIFY_URL` | 异步通知地址 |
 | `PYPAY_ALIPAY_RETURN_URL` | 浏览器同步跳转地址，不作为支付依据 |
-| `PYPAY_ALIPAY_GATEWAY` | 可选，默认生产网关；沙箱请改为沙箱网关 |
+| `PYPAY_ALIPAY_GATEWAY` | 可选，默认生产网关；必须是 HTTPS；沙箱请改为沙箱网关 |
 | `PYPAY_ALIPAY_SELLER_ID` | 可选；设置后会校验通知中的 `seller_id` |
 
 注意：
 
-- 官方支付宝 SDK 的 RSA2 签名实现只接受 **PKCS#1** 私钥。适配层会用 `cryptography` 将 PKCS#8 转为 PKCS#1，不会重写签名算法。
+- 官方支付宝 SDK 的 RSA2 签名实现只接受 **PKCS#1** 私钥，验签只接受 **SPKI** 公钥。配置层会先规范化密钥格式，适配层再把私钥转为 PKCS#1；不会重写签名算法。
 - 首期只实现**支付宝公钥模式**。证书模式（`app_cert_sn` / `alipay_root_cert_sn`）尚未接入，接入前需要扩展适配层并完成真实联调。
 - 支付宝扫码支付（`alipay.trade.precreate`）不在首期范围。若后续接入，需要开通**当面付**产品权限。
 - 微信 Native 使用微信支付公钥模式；配置中必须同时提供公钥和公钥 ID，模块不会调用 `/v3/certificates` 下载平台证书。
@@ -222,6 +222,8 @@ class PaymentClient:
 3. 校验订单号、金额、币种、支付/退款状态。
 4. 转换为统一的 `PaymentNotification`。
 
+微信退款请求默认复用同一个 `notify_url`，因此微信回调入口需要同时处理 `TRANSACTION.*` 和 `REFUND.*` 事件。示例中的 `/notify/wechat` 已按此实现。
+
 调用方必须把**原始请求体**传给 `parse_notification`，不要先反序列化再重新编码。支付宝签名覆盖原始表单字段，重新编码会改变签名内容。
 
 ```python
@@ -314,9 +316,11 @@ uv run --env-file .env uvicorn --factory examples.fastapi_app:create_app --reloa
 - [x] `.gitignore` 排除 `.env`、`*.pem`、`*.key`、`*.crt`、`*.p12`、`*.db`。
 - [x] 回调先验签再解析业务字段。
 - [x] 校验商户号 / appid / seller_id、订单号、金额、币种、状态。
-- [x] 回调处理使用数据库事务和唯一约束。
+- [x] 回调处理使用数据库事务和唯一约束；退款通知按 `out_refund_no` 去重。
 - [x] 超时不判定为失败，要求按原单号查询。
-- [ ] 生产环境仍需配置 HTTPS、请求体大小限制、限流、告警和密钥轮换流程。
+- [x] 示例限制通知请求体为 256 KiB。
+- [ ] 生产环境仍需配置 HTTPS、限流、告警、密钥轮换和反向代理层的请求体限制。
+- [ ] `notify_url` / `return_url` 必须来自服务端配置，不要接受用户输入；多租户场景应使用域名白名单，避免把签名订单数据发到第三方或形成支付后开放跳转。
 
 ## 测试
 
@@ -337,7 +341,8 @@ uv run --env-file .env uvicorn --factory examples.fastapi_app:create_app --reloa
 - 支付宝回调验签、app_id/seller_id 校验、金额/币种校验、状态映射。
 - 伪造回调、重复回调、金额不符、渠道不符、网络超时、渠道错误码。
 - 异步客户端在工作线程执行同步 SDK 调用。
-- FastAPI 示例的下单、回调幂等、主动查单补偿、退款累计。
+- FastAPI 示例的下单、回调幂等、主动查单补偿、退款先到/支付后到、退款去重。
+- PKCS#1/PKCS#8/无头 base64 密钥规范化，以及支付宝 SPKI 公钥验签。
 - 真实签名/加密链路的端到端测试（微信与支付宝各一条）。
 
 **待真实商户联调项**：
@@ -354,8 +359,13 @@ uv run --env-file .env uvicorn --factory examples.fastapi_app:create_app --reloa
 - 首期只覆盖微信 Native 与支付宝电脑网站支付；未实现 JSAPI、小程序、App、H5、订阅/自动续费。
 - 支付宝证书模式未实现。
 - 支付宝退款查询必须同时提供 `out_trade_no`。
+- 支付宝退款以同步响应和 `query_refund` 为准；`RefundRequest.notify_url` 当前只对微信生效。
+- 示例对微信退款通知按单笔增量累计，并按 `(channel, out_refund_no)` 去重；对支付宝交易通知中的 `refund_fee` 按累计值处理。多笔部分退款的最终金额仍应以 `query_refund` 对账为准。
+- 示例的 `reconcile.py` 只扫描 `pending` 订单；已支付订单上的退款漏通知需要通过退款单记录和 `query_refund` 单独对账。
 - `PaymentClient` 绑定单一渠道和单一商户账户；多渠道请分别创建客户端。
 - 示例使用 SQLite，生产环境应替换为项目自己的数据库和事务方案。
+- 示例 `/orders` 没有登录、权限和限流；生产环境必须在业务层补齐。
+- 示例允许客户端传入 `out_trade_no`；生产环境建议由服务端生成，避免订单号被猜测或复用。
 
 ## License
 

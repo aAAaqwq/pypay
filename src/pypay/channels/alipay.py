@@ -1,5 +1,6 @@
 import http.client
 import json
+import re
 from collections.abc import Mapping
 from datetime import datetime
 from typing import Any
@@ -45,6 +46,8 @@ from ..models import (
     QueryRefundResult,
     RefundRequest,
     RefundResult,
+    validate_out_refund_no,
+    validate_out_trade_no,
 )
 from ..money import fen_to_yuan, yuan_to_fen
 
@@ -92,6 +95,13 @@ def _require_url(value: str, name: str) -> str:
     return value
 
 
+def _provider_fen(value: object, field: str) -> int:
+    try:
+        return yuan_to_fen(value)
+    except PaymentValidationError as exc:
+        raise PaymentProviderError(f"Alipay response has an invalid {field}") from exc
+
+
 class AlipayChannel:
     channel = Channel.ALIPAY
 
@@ -114,11 +124,16 @@ class AlipayChannel:
                 "Alipay request failed in transit; query by out_trade_no before treating it as failed"
             ) from exc
         except ResponseException as exc:
-            if "sign verify failed" in str(exc).lower():
+            message = str(exc)
+            if "sign verify failed" in message.lower():
                 raise PaymentSignatureError(
                     "Alipay response signature verification failed"
                 ) from exc
-            raise PaymentProviderError(str(exc) or "Alipay returned an error response") from exc
+            status_match = re.search(r"invalid http status (\d+)", message)
+            http_status = int(status_match.group(1)) if status_match else None
+            raise PaymentProviderError(
+                "Alipay returned an error response", http_status=http_status
+            ) from exc
         except (TimeoutError, ConnectionError, OSError, http.client.HTTPException) as exc:
             raise PaymentNetworkError(
                 "Alipay request timed out or lost connection; query by out_trade_no before treating it as failed"
@@ -162,7 +177,7 @@ class AlipayChannel:
         )
         try:
             form_html = self._client.page_execute(page_request, http_method="POST")
-        except Exception as exc:
+        except RequestException as exc:
             raise PaymentConfigError("Alipay request signing failed") from exc
         return CreatePaymentResult(
             channel=self.channel,
@@ -174,6 +189,7 @@ class AlipayChannel:
         )
 
     def query_payment(self, out_trade_no: str) -> QueryPaymentResult:
+        validate_out_trade_no(out_trade_no)
         model = AlipayTradeQueryModel()
         model.out_trade_no = out_trade_no
         payload = self._execute(AlipayTradeQueryRequest(biz_model=model))
@@ -190,7 +206,7 @@ class AlipayChannel:
         return QueryPaymentResult(
             channel=self.channel,
             out_trade_no=out_trade_no,
-            amount_fen=yuan_to_fen(total_amount),
+            amount_fen=_provider_fen(total_amount, "total_amount"),
             status=_TRADE_STATUS_MAP.get(trade_status, PaymentStatus.UNKNOWN),
             transaction_id=payload.get("trade_no"),
             paid_at=_parse_alipay_time(payload.get("send_pay_date")),
@@ -198,12 +214,12 @@ class AlipayChannel:
         )
 
     def close_payment(self, out_trade_no: str) -> ClosePaymentResult:
+        validate_out_trade_no(out_trade_no)
         model = AlipayTradeCloseModel()
         model.out_trade_no = out_trade_no
         payload = self._execute(AlipayTradeCloseRequest(biz_model=model))
         self._check_code(payload)
-        returned_order = payload.get("out_trade_no")
-        if returned_order is not None and returned_order != out_trade_no:
+        if payload.get("out_trade_no") != out_trade_no:
             raise PaymentProviderError("Alipay returned a mismatched out_trade_no")
         return ClosePaymentResult(
             channel=self.channel, out_trade_no=out_trade_no, status=PaymentStatus.CLOSED
@@ -218,8 +234,7 @@ class AlipayChannel:
             model.refund_reason = request.reason
         payload = self._execute(AlipayTradeRefundRequest(biz_model=model))
         self._check_code(payload)
-        returned_order = payload.get("out_trade_no")
-        if returned_order is not None and returned_order != request.out_trade_no:
+        if payload.get("out_trade_no") != request.out_trade_no:
             raise PaymentProviderError("Alipay returned a mismatched out_trade_no")
         refund_fee = payload.get("refund_fee")
         if refund_fee is None:
@@ -229,7 +244,7 @@ class AlipayChannel:
             channel=self.channel,
             out_refund_no=request.out_refund_no,
             out_trade_no=request.out_trade_no,
-            amount_fen=yuan_to_fen(refund_fee),
+            amount_fen=_provider_fen(refund_fee, "refund_fee"),
             total_amount_fen=request.total_amount_fen,
             status=RefundStatus.SUCCEEDED if fund_change == "Y" else RefundStatus.PENDING,
             created_at=_parse_alipay_time(payload.get("gmt_refund_pay")),
@@ -242,11 +257,17 @@ class AlipayChannel:
             raise PaymentValidationError(
                 "Alipay refund queries require out_trade_no as well as out_refund_no"
             )
+        validate_out_trade_no(out_trade_no)
+        validate_out_refund_no(out_refund_no)
         model = AlipayTradeFastpayRefundQueryModel()
         model.out_trade_no = out_trade_no
         model.out_request_no = out_refund_no
         payload = self._execute(AlipayTradeFastpayRefundQueryRequest(biz_model=model))
         self._check_code(payload)
+        if payload.get("out_trade_no") != out_trade_no:
+            raise PaymentProviderError("Alipay returned a mismatched out_trade_no")
+        if payload.get("out_request_no") != out_refund_no:
+            raise PaymentProviderError("Alipay returned a mismatched out_request_no")
         refund_amount = payload.get("refund_amount")
         if refund_amount is None:
             raise PaymentNotFoundError("Alipay has no refund record for this out_refund_no")
@@ -256,8 +277,10 @@ class AlipayChannel:
             channel=self.channel,
             out_refund_no=out_refund_no,
             out_trade_no=out_trade_no,
-            amount_fen=yuan_to_fen(refund_amount),
-            total_amount_fen=yuan_to_fen(total_amount) if total_amount is not None else None,
+            amount_fen=_provider_fen(refund_amount, "refund_amount"),
+            total_amount_fen=(
+                _provider_fen(total_amount, "total_amount") if total_amount is not None else None
+            ),
             status=(
                 RefundStatus.SUCCEEDED
                 if refund_status == "REFUND_SUCCESS"
@@ -298,10 +321,8 @@ class AlipayChannel:
             raise PaymentSignatureError("Alipay notification signature verification failed")
         if fields.get("app_id") != self._config.appid:
             raise PaymentValidationError("Alipay notification app_id does not match")
-        if self._config.seller_id is not None:
-            seller_id = fields.get("seller_id")
-            if seller_id and seller_id != self._config.seller_id:
-                raise PaymentValidationError("Alipay notification seller_id does not match")
+        if self._config.seller_id is not None and fields.get("seller_id") != self._config.seller_id:
+            raise PaymentValidationError("Alipay notification seller_id does not match")
         notification_id = fields.get("notify_id")
         if not notification_id:
             raise PaymentValidationError("Alipay notification is missing notify_id")
@@ -322,13 +343,13 @@ class AlipayChannel:
             "TRADE_CLOSED": NotificationEvent.PAYMENT_CLOSED,
         }.get(trade_status, NotificationEvent.UNKNOWN)
         refund_fee = fields.get("refund_fee")
-        refund_amount_fen = yuan_to_fen(refund_fee) if refund_fee else None
+        refund_amount_fen = _provider_fen(refund_fee, "refund_fee") if refund_fee else None
         return PaymentNotification(
             channel=self.channel,
             event_type=event,
             notification_id=notification_id,
             out_trade_no=out_trade_no,
-            amount_fen=yuan_to_fen(total_amount),
+            amount_fen=_provider_fen(total_amount, "total_amount"),
             currency=currency,
             status=_TRADE_STATUS_MAP.get(trade_status, PaymentStatus.UNKNOWN),
             transaction_id=fields.get("trade_no"),

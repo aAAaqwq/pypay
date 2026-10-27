@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import secrets
@@ -20,6 +21,7 @@ from pypay import (
     PaymentNetworkError,
     PaymentNotFoundError,
     PaymentNotification,
+    PaymentProviderError,
     PaymentSignatureError,
     PaymentStatus,
     PaymentValidationError,
@@ -29,6 +31,8 @@ from pypay.base import AsyncPaymentGateway
 from .db import AmountMismatch, ChannelMismatch, Database, Order, OrderExists, OrderNotFound
 
 logger = logging.getLogger("pypay.example")
+
+MAX_NOTIFICATION_BODY_BYTES = 256 * 1024
 
 
 class CreateOrderIn(BaseModel):
@@ -135,7 +139,8 @@ def create_app(
             raise HTTPException(status_code=400, detail="invalid payment request") from exc
 
         try:
-            database.create_order(
+            await asyncio.to_thread(
+                database.create_order,
                 out_trade_no=out_trade_no,
                 channel=payload.channel.value,
                 amount_fen=payload.amount_fen,
@@ -148,16 +153,29 @@ def create_app(
             result = await gateway.create_payment(payment_request)
         except PaymentValidationError as exc:
             logger.warning("create_payment validation failure for %s", out_trade_no)
-            database.mark_failed(out_trade_no)
+            await asyncio.to_thread(database.mark_failed, out_trade_no)
             raise HTTPException(status_code=400, detail="invalid payment request") from exc
-        except PaymentNetworkError as exc:
-            logger.warning("create_payment network failure for %s", out_trade_no)
+        except (PaymentNetworkError, PaymentSignatureError) as exc:
+            logger.warning("create_payment ambiguous failure for %s", out_trade_no)
             raise HTTPException(
                 status_code=502,
                 detail={
                     "message": "payment state is unknown; query the order before retrying",
                     "out_trade_no": out_trade_no,
-                    "may_have_succeeded": exc.may_have_succeeded,
+                    "may_have_succeeded": True,
+                },
+            ) from exc
+        except PaymentProviderError as exc:
+            ambiguous = exc.http_status is not None and exc.http_status >= 500
+            if not ambiguous:
+                await asyncio.to_thread(database.mark_failed, out_trade_no)
+            logger.warning("create_payment failed for %s: %s", out_trade_no, type(exc).__name__)
+            raise HTTPException(
+                status_code=502,
+                detail={
+                    "message": "payment provider error",
+                    "out_trade_no": out_trade_no,
+                    "may_have_succeeded": ambiguous,
                 },
             ) from exc
         except PaymentError as exc:
@@ -179,12 +197,12 @@ def create_app(
 
     @app.get("/orders/{out_trade_no}", response_model=OrderOut)
     async def get_order(out_trade_no: str, request: Request) -> OrderOut:
-        order = _require_order(request, out_trade_no)
+        order = await _require_order(request, out_trade_no)
         return OrderOut.from_order(order)
 
     @app.post("/orders/{out_trade_no}/sync", response_model=OrderOut)
     async def sync_order(out_trade_no: str, request: Request) -> OrderOut:
-        order = _require_order(request, out_trade_no)
+        order = await _require_order(request, out_trade_no)
         gateway = _gateway(request, Channel(order.channel))
         try:
             result = await gateway.query_payment(out_trade_no)
@@ -205,31 +223,34 @@ def create_app(
 
         try:
             if result.status is PaymentStatus.PAID:
-                database.mark_paid_from_query(
+                await asyncio.to_thread(
+                    database.mark_paid_from_query,
                     out_trade_no=out_trade_no,
                     amount_fen=result.amount_fen,
                     transaction_id=result.transaction_id,
                     paid_at=result.paid_at.isoformat() if result.paid_at else None,
                 )
             elif result.status is PaymentStatus.CLOSED:
-                database.mark_closed_from_query(out_trade_no)
+                await asyncio.to_thread(database.mark_closed_from_query, out_trade_no)
+            elif result.status is PaymentStatus.FAILED:
+                await asyncio.to_thread(database.mark_failed, out_trade_no)
             elif result.status is PaymentStatus.REFUNDED:
-                database.mark_refunded_from_query(out_trade_no)
+                await asyncio.to_thread(database.mark_refunded_from_query, out_trade_no)
         except AmountMismatch as exc:
             raise HTTPException(status_code=409, detail="provider amount mismatch") from exc
 
-        refreshed = database.get_order(out_trade_no)
+        refreshed = await asyncio.to_thread(database.get_order, out_trade_no)
         if refreshed is None:
             raise HTTPException(status_code=404, detail="order not found")
         return OrderOut.from_order(refreshed)
 
     @app.post("/notify/wechat")
     async def notify_wechat(request: Request) -> JSONResponse:
-        body = await request.body()
+        body = await _read_notification_body(request)
         try:
             gateway = _gateway(request, Channel.WECHAT)
             notification = await gateway.parse_notification(dict(request.headers), body)
-            _apply_notification(request, notification)
+            await _apply_notification(request, notification)
         except PaymentSignatureError:
             logger.warning("rejected WeChat notification: signature")
             return JSONResponse({"code": "FAIL", "message": "invalid signature"}, status_code=401)
@@ -253,11 +274,11 @@ def create_app(
 
     @app.post("/notify/alipay")
     async def notify_alipay(request: Request) -> PlainTextResponse:
-        body = await request.body()
+        body = await _read_notification_body(request)
         try:
             gateway = _gateway(request, Channel.ALIPAY)
             notification = await gateway.parse_notification(dict(request.headers), body)
-            _apply_notification(request, notification)
+            await _apply_notification(request, notification)
         except PaymentSignatureError:
             logger.warning("rejected Alipay notification: signature")
             return PlainTextResponse("failure", status_code=400)
@@ -295,15 +316,30 @@ def _gateway(request: Request, channel: Channel) -> AsyncPaymentGateway:
     return gateway
 
 
-def _require_order(request: Request, out_trade_no: str) -> Order:
-    order = request.app.state.db.get_order(out_trade_no)
+async def _require_order(request: Request, out_trade_no: str) -> Order:
+    order = await asyncio.to_thread(request.app.state.db.get_order, out_trade_no)
     if order is None:
         raise HTTPException(status_code=404, detail="order not found")
     return order
 
 
-def _apply_notification(request: Request, notification: PaymentNotification) -> None:
-    request.app.state.db.apply_notification(notification)
+async def _apply_notification(request: Request, notification: PaymentNotification) -> None:
+    await asyncio.to_thread(request.app.state.db.apply_notification, notification)
+
+
+async def _read_notification_body(request: Request) -> bytes:
+    content_length = request.headers.get("content-length")
+    if content_length is not None:
+        try:
+            declared = int(content_length)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="invalid content-length") from exc
+        if declared > MAX_NOTIFICATION_BODY_BYTES:
+            raise HTTPException(status_code=413, detail="notification body too large")
+    body = await request.body()
+    if len(body) > MAX_NOTIFICATION_BODY_BYTES:
+        raise HTTPException(status_code=413, detail="notification body too large")
+    return body
 
 
 def _new_order_no() -> str:

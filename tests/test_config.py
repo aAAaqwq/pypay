@@ -184,3 +184,36 @@ def test_wechat_config_rejects_missing_key_value() -> None:
             public_key_id="PUB_KEY_ID_TEST",
             notify_url="https://example.com/notify/wechat",
         )
+
+
+def test_wechat_config_normalizes_pkcs1_keys(keys: Keys) -> None:
+    config = WeChatPayConfig.from_env(
+        wechat_env(
+            keys,
+            PYPAY_WECHAT_PRIVATE_KEY=keys.merchant.private_pem_pkcs1,
+            PYPAY_WECHAT_PUBLIC_KEY=keys.platform.public_pem_pkcs1,
+        )
+    )
+    assert config.private_key.startswith("-----BEGIN PRIVATE KEY-----")
+    assert config.public_key.startswith("-----BEGIN PUBLIC KEY-----")
+
+
+def test_alipay_config_accepts_raw_base64_keys(keys: Keys) -> None:
+    from .keys import pem_body
+
+    config = AlipayConfig.from_env(
+        alipay_env(
+            keys,
+            PYPAY_ALIPAY_PRIVATE_KEY=pem_body(keys.app.private_pem_pkcs8),
+            PYPAY_ALIPAY_PUBLIC_KEY=pem_body(keys.alipay.public_pem_pkcs1),
+        )
+    )
+    assert config.private_key.startswith("-----BEGIN PRIVATE KEY-----")
+    assert config.public_key.startswith("-----BEGIN PUBLIC KEY-----")
+
+
+def test_alipay_config_requires_https_gateway(keys: Keys) -> None:
+    with pytest.raises(PaymentConfigError):
+        AlipayConfig.from_env(
+            alipay_env(keys, PYPAY_ALIPAY_GATEWAY="http://openapi.alipay.com/gateway.do")
+        )

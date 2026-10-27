@@ -1,3 +1,4 @@
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -14,6 +15,7 @@ MAX_DESCRIPTION_LENGTH = 127
 MAX_OUT_REFUND_NO_LENGTH = 64
 MAX_ATTACH_LENGTH = 128
 MAX_REFUND_REASON_LENGTH = 80
+_ORDER_NUMBER_RE = re.compile(r"^[0-9A-Za-z_\-|*@]+$")
 
 
 def _require_text(value: object, name: str, max_length: int) -> str:
@@ -30,6 +32,21 @@ def _optional_text(value: object, name: str, max_length: int) -> str | None:
     if value is None:
         return None
     return _require_text(value, name, max_length)
+
+
+def _require_order_number(value: object, name: str, max_length: int) -> str:
+    text = _require_text(value, name, max_length)
+    if not _ORDER_NUMBER_RE.fullmatch(text):
+        raise PaymentValidationError(f"{name} must contain only digits, letters, _ - | * @")
+    return text
+
+
+def validate_out_trade_no(value: str) -> None:
+    _require_order_number(value, "out_trade_no", MAX_OUT_TRADE_NO_LENGTH)
+
+
+def validate_out_refund_no(value: str) -> None:
+    _require_order_number(value, "out_refund_no", MAX_OUT_REFUND_NO_LENGTH)
 
 
 def _require_http_url(value: object, name: str) -> str:
@@ -60,7 +77,7 @@ class CreatePaymentRequest:
     attach: str | None = None
 
     def __post_init__(self) -> None:
-        _require_text(self.out_trade_no, "out_trade_no", MAX_OUT_TRADE_NO_LENGTH)
+        _require_order_number(self.out_trade_no, "out_trade_no", MAX_OUT_TRADE_NO_LENGTH)
         validate_fen(self.amount_fen)
         _require_text(self.description, "description", MAX_DESCRIPTION_LENGTH)
         if self.notify_url is not None:
@@ -112,8 +129,8 @@ class RefundRequest:
     notify_url: str | None = None
 
     def __post_init__(self) -> None:
-        _require_text(self.out_refund_no, "out_refund_no", MAX_OUT_REFUND_NO_LENGTH)
-        _require_text(self.out_trade_no, "out_trade_no", MAX_OUT_TRADE_NO_LENGTH)
+        _require_order_number(self.out_refund_no, "out_refund_no", MAX_OUT_REFUND_NO_LENGTH)
+        _require_order_number(self.out_trade_no, "out_trade_no", MAX_OUT_TRADE_NO_LENGTH)
         validate_fen(self.amount_fen, "amount_fen")
         validate_fen(self.total_amount_fen, "total_amount_fen")
         if self.amount_fen > self.total_amount_fen:
@@ -164,11 +181,19 @@ class PaymentNotification:
 
     def __post_init__(self) -> None:
         _require_text(self.notification_id, "notification_id", 128)
-        _require_text(self.out_trade_no, "out_trade_no", MAX_OUT_TRADE_NO_LENGTH)
-        if not isinstance(self.amount_fen, int) or self.amount_fen <= 0:
+        _require_order_number(self.out_trade_no, "out_trade_no", MAX_OUT_TRADE_NO_LENGTH)
+        if self.out_refund_no is not None:
+            _require_order_number(self.out_refund_no, "out_refund_no", MAX_OUT_REFUND_NO_LENGTH)
+        if (
+            isinstance(self.amount_fen, bool)
+            or not isinstance(self.amount_fen, int)
+            or self.amount_fen <= 0
+        ):
             raise PaymentValidationError("amount_fen must be a positive integer")
         if self.refund_amount_fen is not None and (
-            not isinstance(self.refund_amount_fen, int) or self.refund_amount_fen <= 0
+            isinstance(self.refund_amount_fen, bool)
+            or not isinstance(self.refund_amount_fen, int)
+            or self.refund_amount_fen <= 0
         ):
             raise PaymentValidationError("refund_amount_fen must be a positive integer")
         object.__setattr__(self, "provider_data", MappingProxyType(dict(self.provider_data)))

@@ -438,3 +438,95 @@ def test_payment_client_validates_expected_amount(
     assert result.event_type is NotificationEvent.PAYMENT_SUCCEEDED
     with pytest.raises(PaymentValidationError):
         client.parse_notification(headers, body, expected_amount_fen=99)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("mchid", "1900000000"), ("appid", "wxdifferent000000")],
+)
+def test_query_payment_rejects_wrong_merchant_or_app(
+    wechat_config: WeChatPayConfig,
+    wechat_transport: WeChatTransport,
+    field: str,
+    value: str,
+) -> None:
+    wechat_transport.queue(200, query_payload(**{field: value}))
+    with pytest.raises(PaymentProviderError):
+        make_channel(wechat_config).query_payment(ORDER)
+
+
+def test_unexpected_programming_error_propagates(
+    wechat_config: WeChatPayConfig, wechat_transport: WeChatTransport
+) -> None:
+    wechat_transport.queue_exception(TypeError("programming bug"))
+    with pytest.raises(TypeError):
+        make_channel(wechat_config).query_payment(ORDER)
+
+
+def test_generic_sdk_error_is_provider_error(
+    wechat_config: WeChatPayConfig, wechat_transport: WeChatTransport
+) -> None:
+    wechat_transport.queue_exception(Exception("sdk failure"))
+    with pytest.raises(PaymentProviderError):
+        make_channel(wechat_config).query_payment(ORDER)
+
+
+def test_pkcs1_keys_work_with_the_sdk(keys: Keys, wechat_transport: WeChatTransport) -> None:
+    config = WeChatPayConfig(
+        mchid="1900000109",
+        appid="wxd678efh567hg6787",
+        apiv3_key="a" * 32,
+        cert_serial_no="MERCHANT_SERIAL",
+        private_key=keys.merchant.private_pem_pkcs1,
+        public_key=keys.platform.public_pem_pkcs1,
+        public_key_id="PUB_KEY_ID_TEST",
+        notify_url="https://example.com/notify/wechat",
+        timeout=5,
+    )
+    wechat_transport.queue(200, {"code_url": "weixin://wxpay/bizpayurl?pr=pkcs1"})
+    result = make_channel(config).create_payment(
+        CreatePaymentRequest(out_trade_no=ORDER, amount_fen=100, description="test")
+    )
+    assert result.qr_code_url == "weixin://wxpay/bizpayurl?pr=pkcs1"
+
+
+def test_create_payment_sends_expiry_and_attach(
+    wechat_config: WeChatPayConfig, wechat_transport: WeChatTransport
+) -> None:
+    from datetime import datetime, timezone
+
+    wechat_transport.queue(200, {"code_url": "weixin://test"})
+    make_channel(wechat_config).create_payment(
+        CreatePaymentRequest(
+            out_trade_no=ORDER,
+            amount_fen=100,
+            description="test",
+            expires_at=datetime(2026, 10, 27, 2, 0, tzinfo=timezone.utc),
+            attach="meta",
+        )
+    )
+    payload = wechat_transport.calls[0]["payload"]
+    assert payload["time_expire"] == "2026-10-27T02:00:00+00:00"
+    assert payload["attach"] == "meta"
+
+
+def test_query_payment_rejects_invalid_json(
+    wechat_config: WeChatPayConfig, wechat_transport: WeChatTransport
+) -> None:
+    wechat_transport.queue(200, "not-json")
+    with pytest.raises(PaymentProviderError):
+        make_channel(wechat_config).query_payment(ORDER)
+
+
+def test_parse_refund_abnormal_keeps_order_paid(wechat_config: WeChatPayConfig, keys: Keys) -> None:
+    headers, body = notification(keys, "REFUND.ABNORMAL", refund_resource(refund_status="ABNORMAL"))
+    result = make_channel(wechat_config).parse_notification(headers, body)
+    assert result.event_type is NotificationEvent.REFUND_FAILED
+    assert result.status is PaymentStatus.PAID
+
+
+def test_parse_refund_closed_keeps_order_paid(wechat_config: WeChatPayConfig, keys: Keys) -> None:
+    headers, body = notification(keys, "REFUND.CLOSED", refund_resource(refund_status="CLOSED"))
+    result = make_channel(wechat_config).parse_notification(headers, body)
+    assert result.event_type is NotificationEvent.REFUND_FAILED
+    assert result.status is PaymentStatus.PAID

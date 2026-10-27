@@ -282,6 +282,7 @@ def test_query_refund_success(
         "code": "10000",
         "msg": "Success",
         "out_trade_no": ORDER,
+        "out_request_no": REFUND,
         "refund_amount": "1.00",
         "total_amount": "1.00",
         "refund_status": "REFUND_SUCCESS",
@@ -312,7 +313,12 @@ def test_query_refund_missing_record(
     alipay_transport: AlipayTransport,
     keys: Keys,
 ) -> None:
-    payload = {"code": "10000", "msg": "Success", "out_trade_no": ORDER}
+    payload = {
+        "code": "10000",
+        "msg": "Success",
+        "out_trade_no": ORDER,
+        "out_request_no": REFUND,
+    }
     alipay_transport.queue(
         alipay_response(
             "alipay_trade_fastpay_refund_query_response", payload, keys.alipay.private_key
@@ -465,4 +471,185 @@ def test_parse_notification_rejects_missing_sign_type(
     signature = sign_sha256(keys.alipay.private_key, alipay_sign_content(fields).encode())
     body = urlencode({**fields, "sign": signature}).encode()
     with pytest.raises(PaymentSignatureError):
+        make_channel(alipay_config).parse_notification({}, body)
+
+
+def test_query_refund_rejects_mismatched_identifiers(
+    alipay_config: AlipayConfig,
+    alipay_transport: AlipayTransport,
+    keys: Keys,
+) -> None:
+    payload = {
+        "code": "10000",
+        "msg": "Success",
+        "out_trade_no": "OTHER",
+        "out_request_no": REFUND,
+        "refund_amount": "1.00",
+        "refund_status": "REFUND_SUCCESS",
+    }
+    alipay_transport.queue(
+        alipay_response(
+            "alipay_trade_fastpay_refund_query_response", payload, keys.alipay.private_key
+        )
+    )
+    with pytest.raises(PaymentProviderError):
+        make_channel(alipay_config).query_refund(REFUND, ORDER)
+
+
+def test_query_refund_rejects_mismatched_refund_number(
+    alipay_config: AlipayConfig,
+    alipay_transport: AlipayTransport,
+    keys: Keys,
+) -> None:
+    payload = {
+        "code": "10000",
+        "msg": "Success",
+        "out_trade_no": ORDER,
+        "out_request_no": "OTHER",
+        "refund_amount": "1.00",
+        "refund_status": "REFUND_SUCCESS",
+    }
+    alipay_transport.queue(
+        alipay_response(
+            "alipay_trade_fastpay_refund_query_response", payload, keys.alipay.private_key
+        )
+    )
+    with pytest.raises(PaymentProviderError):
+        make_channel(alipay_config).query_refund(REFUND, ORDER)
+
+
+def test_parse_notification_rejects_missing_seller_id(
+    alipay_config: AlipayConfig, keys: Keys
+) -> None:
+    from dataclasses import replace
+
+    config = replace(alipay_config, seller_id="2088000000000000")
+    fields = notification_fields()
+    fields.pop("seller_id")
+    body = alipay_notification_body(fields, keys.alipay.private_key)
+    with pytest.raises(PaymentValidationError):
+        make_channel(config).parse_notification({}, body)
+
+
+def test_query_payment_malformed_provider_amount(
+    alipay_config: AlipayConfig,
+    alipay_transport: AlipayTransport,
+    keys: Keys,
+) -> None:
+    alipay_transport.queue(
+        alipay_response(
+            "alipay_trade_query_response",
+            query_payload(total_amount="not-a-number"),
+            keys.alipay.private_key,
+        )
+    )
+    with pytest.raises(PaymentProviderError):
+        make_channel(alipay_config).query_payment(ORDER)
+
+
+def test_pkcs1_alipay_public_key_verifies_notifications(
+    alipay_config: AlipayConfig, keys: Keys
+) -> None:
+    config = AlipayConfig(
+        appid=alipay_config.appid,
+        private_key=alipay_config.private_key,
+        public_key=keys.alipay.public_pem_pkcs1,
+        notify_url=alipay_config.notify_url,
+        return_url=alipay_config.return_url,
+        gateway=alipay_config.gateway,
+        timeout=alipay_config.timeout,
+    )
+    body = alipay_notification_body(notification_fields(), keys.alipay.private_key)
+    result = make_channel(config).parse_notification({}, body)
+    assert result.event_type is NotificationEvent.PAYMENT_SUCCEEDED
+
+
+def test_query_payment_rejects_bad_order_number(
+    alipay_config: AlipayConfig, alipay_transport: AlipayTransport
+) -> None:
+    with pytest.raises(PaymentValidationError):
+        make_channel(alipay_config).query_payment("ORDER/1")
+    assert alipay_transport.calls == []
+
+
+def test_query_refund_rejects_bad_numbers(
+    alipay_config: AlipayConfig, alipay_transport: AlipayTransport
+) -> None:
+    with pytest.raises(PaymentValidationError):
+        make_channel(alipay_config).query_refund("REF/1", ORDER)
+    with pytest.raises(PaymentValidationError):
+        make_channel(alipay_config).query_refund(REFUND, "ORDER/1")
+    assert alipay_transport.calls == []
+
+
+def test_alipay_http_error_status_is_preserved(
+    alipay_config: AlipayConfig, alipay_transport: AlipayTransport
+) -> None:
+    from alipay.aop.api.exception.Exception import ResponseException
+
+    alipay_transport.queue_exception(
+        ResponseException("invalid http status 502,detail body: bad gateway")
+    )
+    with pytest.raises(PaymentProviderError) as exc_info:
+        make_channel(alipay_config).query_payment(ORDER)
+    assert exc_info.value.http_status == 502
+
+
+def test_create_payment_signing_failure_is_config_error(
+    monkeypatch: pytest.MonkeyPatch, alipay_config: AlipayConfig
+) -> None:
+    from alipay.aop.api.exception.Exception import RequestException
+
+    from pypay.errors import PaymentConfigError
+
+    channel = make_channel(alipay_config)
+
+    def boom(*args: object, **kwargs: object) -> str:
+        raise RequestException("sign failed")
+
+    monkeypatch.setattr(channel._client, "page_execute", boom)
+    with pytest.raises(PaymentConfigError):
+        channel.create_payment(
+            CreatePaymentRequest(out_trade_no=ORDER, amount_fen=100, description="test")
+        )
+
+
+def test_create_payment_unexpected_error_propagates(
+    monkeypatch: pytest.MonkeyPatch, alipay_config: AlipayConfig
+) -> None:
+    channel = make_channel(alipay_config)
+
+    def boom(*args: object, **kwargs: object) -> str:
+        raise ValueError("programming bug")
+
+    monkeypatch.setattr(channel._client, "page_execute", boom)
+    with pytest.raises(ValueError):
+        channel.create_payment(
+            CreatePaymentRequest(out_trade_no=ORDER, amount_fen=100, description="test")
+        )
+
+
+def test_query_payment_rejects_invalid_json(
+    alipay_config: AlipayConfig, alipay_transport: AlipayTransport
+) -> None:
+    alipay_transport.queue(b"not-json")
+    with pytest.raises(PaymentProviderError):
+        make_channel(alipay_config).query_payment(ORDER)
+
+
+def test_query_payment_rejects_unexpected_shape(
+    alipay_config: AlipayConfig, alipay_transport: AlipayTransport
+) -> None:
+    alipay_transport.queue(b"[]")
+    with pytest.raises(PaymentProviderError):
+        make_channel(alipay_config).query_payment(ORDER)
+
+
+def test_parse_notification_rejects_missing_total_amount(
+    alipay_config: AlipayConfig, keys: Keys
+) -> None:
+    fields = notification_fields()
+    fields.pop("total_amount")
+    body = alipay_notification_body(fields, keys.alipay.private_key)
+    with pytest.raises(PaymentValidationError):
         make_channel(alipay_config).parse_notification({}, body)
