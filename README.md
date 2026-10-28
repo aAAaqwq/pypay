@@ -246,6 +246,40 @@ notification.assert_matches(
 )
 ```
 
+### 统一通知字段
+
+`parse_notification` 返回 `PaymentNotification`：
+
+| 字段 | 说明 | 微信来源 | 支付宝来源 |
+| --- | --- | --- | --- |
+| `channel` | `wechat` / `alipay` | — | — |
+| `event_type` | `payment.succeeded`、`payment.pending`、`payment.closed`、`payment.failed`、`refund.succeeded`、`refund.failed`、`unknown` | `TRANSACTION.*`、`REFUND.*` | `trade_status` |
+| `notification_id` | 渠道通知唯一 ID，用于去重 | 通知 `id` | `notify_id` |
+| `out_trade_no` | 商户订单号，与业务订单绑定 | `out_trade_no` | `out_trade_no` |
+| `amount_fen` | 订单总金额（分） | `amount.total` | `total_amount` |
+| `currency` | 币种，当前只支持 `CNY` | `amount.currency` | `currency` |
+| `status` | 统一支付状态 | `trade_state` | `trade_status` |
+| `transaction_id` | 渠道交易号 | `transaction_id` | `trade_no` |
+| `out_refund_no` | 退款单号，仅退款通知 | `out_refund_no` | 无（用 `out_request_no` 对账） |
+| `refund_amount_fen` | 退款金额（分），仅退款通知 | 单笔退款金额 | `refund_fee` 累计值 |
+| `occurred_at` | 渠道完成时间 | `success_time` | `gmt_payment` / `notify_time` |
+| `provider_data` | 渠道原始字段（只读），仅用于排查 | 解密后的 `resource` | 表单字段 |
+
+注意：
+
+- 退款通知的 `status` 只有在**全额退款**时才是 `refunded`；部分退款仍是 `paid`，业务应使用 `refund_amount_fen` 判断退款金额。
+- 微信退款金额是**单笔**退款金额，支付宝 `refund_fee` 是**累计**退款金额；示例 `examples/db.py` 已分别处理。
+- 支付宝 `WAIT_BUYER_PAY` 会映射为 `payment.pending`；微信默认只在支付成功/关闭时推送。
+- 业务逻辑只依赖统一字段；`provider_data` 不建议参与发货判断，渠道字段可能变化。
+
+### 渠道期望的响应
+
+- 微信：成功返回 HTTP 200 + `{"code":"SUCCESS","message":"成功"}`；失败返回 `FAIL` 和非 2xx（示例为 401/400/404/500）。
+- 支付宝：成功返回纯文本 `success`；返回其他内容会被视为失败并重试。
+- 重复回调：已处理过的通知仍返回成功，避免渠道无限重试；去重靠 `notification_id` 唯一约束。
+
+业务系统之间的 webhook 事件格式、签名和重试策略见「方式 B」。
+
 浏览器跳转（支付宝 `return_url`）只用于展示结果，**不能作为支付成功依据**。支付成功以可信回调或主动查单为准。
 
 ## FastAPI 示例
