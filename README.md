@@ -97,6 +97,16 @@ cp .env.example .env
 - 支付宝扫码支付（`alipay.trade.precreate`）不在首期范围。若后续接入，需要开通**当面付**产品权限。
 - 微信 Native 使用微信支付公钥模式；配置中必须同时提供公钥和公钥 ID，模块不会调用 `/v3/certificates` 下载平台证书。
 
+### 密钥安全
+
+- 密钥只放在部署机的只读文件或 Secret Manager，不要写进镜像、仓库、日志或前端。
+- 本机文件权限：密钥目录 `700`，私钥、APIv3 密钥和证书 `600`；不要放在同步盘或公开目录。
+- 测试与生产使用不同商户号/appid 和不同密钥；演示模式不要配置真实密钥。
+- APIv3 密钥、商户证书私钥、支付宝应用私钥都要有轮换预案；怀疑泄露时先轮换再排查。
+- 服务日志只记录渠道错误码和订单号，不记录签名原文、私钥、APIv3 密钥或完整回调体。
+- 生产环境通过 KMS/Vault/云 Secret Manager 注入；容器只挂载需要的文件。
+- 不要把 `.env`、`*.pem`、`*.p12` 放进 Web 根目录或可下载路径。
+
 ## 快速开始
 
 ```python
@@ -335,30 +345,30 @@ uv run --env-file .env uvicorn --factory examples.fastapi_app:create_app --reloa
 
 二维码由 `segno` 在服务端生成，不依赖外部 CDN；安装 `.[examples]` 即可。
 
-## 接入业务系统（以 super-aigc 为例）
+## 接入业务系统（把 demo 升级为可接入的支付服务）
 
 ### 先给结论
 
-**不要在生产环境让 super-aigc 把用户直接跳转到本项目的验证页（`examples/static/index.html`）来收款。**
+**不要在生产环境让业务系统把用户直接跳转到本项目的验证页（`examples/static/index.html`）来收款。**
 
 验证页是本地联调工具，不是收银台产品：
 
 - 没有登录、权限和限流，任何人都能调用 `/orders`。
-- 金额和商品描述由浏览器提交，服务端没有和 super-aigc 的订单校验。
-- 订单、回调和发货都落在示例 SQLite 里，super-aigc 不知道支付结果，无法据此开通额度。
+- 金额和商品描述由浏览器提交，服务端没有和业务系统的订单校验。
+- 订单、回调和发货都落在示例 SQLite 里，业务系统不知道支付结果，无法据此开通额度。
 - 演示模式会绕过回调验签，`/demo/pay` 可以直接把订单改成已支付。
 
 推荐的接入方式：
 
 | 方式 | 适用场景 | 做法 |
 | --- | --- | --- |
-| **A. 后端嵌入（推荐）** | super-aigc 自己收款、自己发货 | super-aigc 后端依赖 `pypay`，自己建单、存单、收回调、发货；前端只复用二维码展示逻辑 |
-| **B. 独立收银台** | 支付需要独立部署、多个业务共用 | 把示例升级成有鉴权、订单绑定和回调转发的独立服务；super-aigc 创建订单后跳转，支付结果回传 super-aigc |
+| **A. 后端嵌入（推荐）** | 业务系统自己收款、自己发货 | 业务系统后端依赖 `pypay`，自己建单、存单、收回调、发货；前端只复用二维码展示逻辑 |
+| **B. 独立收银台** | 支付需要独立部署、多个业务共用 | 把示例升级成有鉴权、订单绑定和回调转发的独立服务；业务系统创建订单后跳转，支付结果回传业务系统 |
 | C. 直接跳转示例页 | 只用于本地演示 | **不可用于生产** |
 
-页面本身可以保留并演进成生产收银台，但**订单、金额、回调和发货必须回到 super-aigc 自己的后端**，不能只做一个跳转。
+页面本身可以保留并演进成生产收银台，但**订单、金额、回调和发货必须回到业务系统自己的后端**，不能只做一个跳转。
 
-### 方式 A：在 super-aigc 后端嵌入 pypay
+### 方式 A：在业务系统后端嵌入 pypay
 
 1. 安装依赖（同一仓库内可直接用 path 依赖）：
 
@@ -367,10 +377,10 @@ uv run --env-file .env uvicorn --factory examples.fastapi_app:create_app --reloa
    # 或 pip install -e ../pypay
    ```
 
-2. 在 super-aigc 的部署环境配置 `PYPAY_CHANNELS`、`PYPAY_WECHAT_*`、`PYPAY_ALIPAY_*`。`PYPAY_WECHAT_NOTIFY_URL` 必须指向 super-aigc 自己的公网 HTTPS 接口，例如：
+2. 在业务系统的部署环境配置 `PYPAY_CHANNELS`、`PYPAY_WECHAT_*`、`PYPAY_ALIPAY_*`。`PYPAY_WECHAT_NOTIFY_URL` 必须指向业务系统自己的公网 HTTPS 接口，例如：
 
    ```text
-   https://api.super-aigc.example/pay/notify/wechat
+   https://api.example.com/pay/notify/wechat
    ```
 
 3. 下单时先写自己的订单，再调用 pypay；金额以服务端订单为准，绝不接受前端传入的金额：
@@ -387,18 +397,18 @@ uv run --env-file .env uvicorn --factory examples.fastapi_app:create_app --reloa
            CreatePaymentRequest(
                out_trade_no=order.out_trade_no,
                amount_fen=order.amount_fen,
-               description=f"super-aigc 充值 {order.out_trade_no}",
+               description=f"业务系统充值 {order.out_trade_no}",
            )
        )
        await db.save_payment_payload(order.out_trade_no, result.qr_code_url, result.form_html)
        return order.out_trade_no
    ```
 
-4. 前端（或 super-aigc 的收银页）只负责展示：
+4. 前端（或业务系统的收银页）只负责展示：
 
    - 微信：把 `qr_code_url` 渲染成二维码，例如复用示例的 `/qr.svg?data=...`，或用前端二维码库。
    - 支付宝：把 `form_html` 放到新窗口/iframe 提交，或跳转到表单页。
-   - 轮询 super-aigc 自己的 `GET /orders/{out_trade_no}` 展示状态；不要用浏览器跳转判定成功。
+   - 轮询业务系统自己的 `GET /orders/{out_trade_no}` 展示状态；不要用浏览器跳转判定成功。
 
 5. 回调入口必须读取原始请求体，验签后在**同一个数据库事务**里去重、更新订单、发货：
 
@@ -427,22 +437,140 @@ uv run --env-file .env uvicorn --factory examples.fastapi_app:create_app --reloa
 
 6. 定时任务扫描 `pending` 订单，调用 `query_payment` 补偿漏通知；网络超时不要直接判失败，先按原订单号查单。浏览器跳转（`return_url`）只展示结果，不修改订单状态。
 
-### 方式 B：把示例升级成独立收银台
+### 方式 B：把示例升级成可接入的独立支付服务
 
-如果后续确实要把这个页面独立部署成收银台，至少补齐：
+目标：接入方只通过稳定的 HTTP API 和 webhook 对接，不接触 pypay、商户密钥或微信/支付宝回调。收银页只是这套服务的一个前端。
+
+#### 1. 角色与边界
+
+| 角色 | 负责 | 不负责 |
+| --- | --- | --- |
+| 业务后端 | 用户、商品、业务订单、额度/权益 | 不保存商户密钥，不直接解析渠道回调 |
+| 支付服务 | 支付订单、渠道适配、回调验签、退款、对账 | 不保存业务用户和额度 |
+| 收银页 | 展示二维码/收银台表单、轮询状态 | 不决定金额，不直接修改订单状态 |
+
+关键原则：**支付服务只认“支付订单”，业务系统只认“业务订单”**，两者用唯一的 `merchant_order_id` 绑定；金额由业务后端决定，收银页和浏览器不能传金额。
+
+#### 2. 对外接口
+
+| 方法 | 路径 | 鉴权 | 说明 |
+| --- | --- | --- | --- |
+| `POST` | `/v1/payments` | 服务间 HMAC | 创建支付，必须带 `Idempotency-Key` |
+| `GET` | `/v1/payments/{payment_id}` | 服务间 HMAC | 查询支付状态 |
+| `POST` | `/v1/payments/{payment_id}/close` | 服务间 HMAC | 关单 |
+| `POST` | `/v1/refunds` | 服务间 HMAC | 退款，必须带 `Idempotency-Key` |
+| `GET` | `/pay/{token}` | 短时签名 token | 收银页，token 绑定 `payment_id` |
+| `POST` | `/notify/wechat`、`/notify/alipay` | 渠道验签 | 只暴露给渠道，公网 HTTPS |
+| `POST` | 业务方 webhook | HMAC 签名 | 支付/退款事件，失败重试 |
+
+创建支付请求示例：
+
+```json
+{
+  "merchant_order_id": "ORDER-20261028-001",
+  "amount_fen": 100,
+  "channel": "wechat",
+  "description": "单次购买",
+  "user_ref": "user-123",
+  "expires_at": "2026-10-28T12:00:00+08:00"
+}
+```
+
+返回：
+
+```json
+{
+  "payment_id": "pay_01J...",
+  "status": "pending",
+  "qr_code_url": "weixin://wxpay/bizpayurl?pr=...",
+  "form_html": null,
+  "expires_at": "2026-10-28T12:00:00+08:00"
+}
+```
+
+支付成功 webhook：
+
+```json
+{
+  "event_id": "evt_01J...",
+  "event_type": "payment.succeeded",
+  "payment_id": "pay_01J...",
+  "merchant_order_id": "ORDER-20261028-001",
+  "amount_fen": 100,
+  "transaction_id": "420000...",
+  "occurred_at": "2026-10-28T11:05:00+08:00"
+}
+```
+
+请求头带 `X-Signature`、`X-Timestamp`；业务方按 `event_id` 去重，成功返回 `2xx`。
+
+#### 3. 订单、状态与幂等
+
+- `payment_orders` 对 `(merchant_id, merchant_order_id)` 建唯一约束，重复创建返回同一笔支付。
+- 创建和退款都以 `Idempotency-Key` 建唯一记录；同 key 重放返回第一次的结果。
+- `notifications` 对 `(channel, notification_id)` 唯一；退款再加 `(channel, out_refund_no)` 部分唯一索引。
+- 回调处理在**同一个事务**内：插入通知唯一键 → 校验订单/金额/渠道 → 更新状态 → 触发发货/权益。
+- 状态机：`pending → paid / closed / failed`；`paid → refunded`（支持部分退款）。不要允许逆向跳转。
+- webhook 用 outbox 表记录，按 `event_id` 去重，指数退避重试；业务方也要幂等。
+- 浏览器跳转只展示结果；支付成功以渠道回调或主动查单为准。
+
+#### 4. 安全
+
+- **服务间鉴权**：HMAC-SHA256（timestamp + nonce + body），允许 5 分钟时钟偏差，nonce 缓存防重放；密钥定期轮换。
+- **收银页鉴权**：短时签名 token（建议 ≤15 分钟），绑定 `payment_id` 和业务单号；不要用可猜测的自增 ID。
+- **金额完整性**：金额只来自业务后端的签名请求；支付服务校验金额与业务订单一致；二维码/表单接口不回传可篡改的金额。
+- **渠道回调**：读取原始请求体，先验签再解析；校验商户号、appid、订单号、金额、币种；重复/伪造回调不能改变订单。
+- **webhook 签名**：支付服务用独立密钥签名，业务方验签；不要把商户私钥或 APIv3 密钥传给业务方。
+- **密钥管理**：KMS/Secret Manager 或只读文件挂载，文件权限 `600`；测试与生产使用不同商户号/appid；定期轮换 APIv3 密钥和商户证书。
+- **网络与日志**：只暴露 `/notify/*` 和收银页；管理接口走内网或 IP 白名单；关闭生产 `/docs`；日志脱敏，不记录私钥、APIv3 密钥、完整回调原文。
+- **限流与请求体**：按 token/IP/接口限流；创建支付、回调、查询分别限额；限制请求体大小（示例为 256 KiB）。
+
+#### 5. 告警与对账
+
+至少监控：
+
+- 回调验签失败率、回调 5xx 率、重复回调比例。
+- `pending` 超过 5 分钟的订单数、支付成功率、渠道错误码分布。
+- webhook 重试耗尽、退款长时间未完成、对账金额不一致。
+- 渠道证书/公钥轮换到期时间。
+
+定时任务扫描 `pending` 订单调用 `query_payment` 补偿；退款以 `query_refund` 对账。对账差异要能定位到 `payment_id` 和业务单号。
+
+#### 6. 上线顺序
+
+1. 拆分配置：删除演示网关和 `/demo/pay`，生产环境硬性禁止演示模式。
+2. 建订单表、通知唯一键、幂等表和迁移脚本。
+3. 实现创建支付、查询、关单和收银页。
+4. 接入渠道回调、webhook outbox 和重试。
+5. 接入主动查单、对账和退款。
+6. 加服务间鉴权、收银页 token、限流和告警。
+7. 补测试：伪造回调、重复回调、金额不符、并发、超时、webhook 重放。
+8. 小流量灰度，确认回调可达和对账一致后再放量。
+
+#### 7. 接入方需要做什么
+
+1. 申请 `merchant_id` / HMAC 密钥，配置自己的 webhook 地址。
+2. 创建支付时传业务单号、金额和 `Idempotency-Key`。
+3. 把收银页嵌入或跳转给用户；不要在前端计算或修改金额。
+4. 验签 webhook，按 `event_id` 去重，成功后返回 `2xx`。
+5. 提供查询兜底：webhook 丢失时按 `payment_id` 或业务单号主动查单。
+6. 发货/开额度必须幂等，不能因为重复 webhook 重复发放。
+
+#### 8. 从当前 demo 改动的清单
 
 - [ ] 关闭 `PYPAY_DEMO_MODE`，删除或禁用 `/demo/pay`。
-- [ ] `/orders` 增加鉴权；金额、商品和订单号由服务端或 super-aigc 决定，不能由浏览器提交。
-- [ ] 收银台订单与 super-aigc 业务订单一一绑定，回调后通过直接写库或签名 webhook 通知 super-aigc 发货。
+- [ ] `/orders` 增加鉴权；金额、商品和订单号由服务端决定，不能由浏览器提交。
+- [ ] 支付订单与业务订单一一绑定，回调后通过直接写库或签名 webhook 通知业务系统发货。
 - [ ] 订单表、通知唯一键、事务和发货幂等（参考 `examples/db.py`）。
 - [ ] 公网 HTTPS 回调地址、验签、金额/渠道/订单校验、请求体大小限制。
 - [ ] 主动查单补偿、对账任务、退款流程。
-- [ ] HTTPS、限流、告警、日志脱敏、密钥管理和轮换。
+- [ ] 服务间 HMAC、收银页短时 token、限流、告警、日志脱敏。
+- [ ] 密钥管理和轮换；测试与生产商户隔离。
 - [ ] 不暴露 `/docs`、调试端点或示例数据库。
 
 ### 一句话选择
 
-- super-aigc 自己发货：**方式 A**，pypay 当库用，页面 UI 只作为前端参考。
+- 业务系统自己发货：**方式 A**，pypay 当库用，页面 UI 只作为前端参考。
 - 多个业务共用一个支付服务：**方式 B**，先把示例改造成有鉴权和订单绑定的独立服务。
 - 只是本地看二维码/走通流程：可以用验证页，但不要对公网开放，也不要接真实收款。
 
