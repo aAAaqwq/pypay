@@ -716,6 +716,26 @@ uv run --env-file .env uvicorn --factory examples.fastapi_app:create_app --reloa
 - 事务消息可以减少“本地事务成功但消息没发”的问题，但 DB outbox 更简单、可移植；两者都要幂等。
 - 监控消费堆积、重试、死信、回调失败率；对账任务不能省。
 
+### 微信回调能配多个 URL 吗？怎么对接多个平台？
+
+微信 APIv3 Native 的 `notify_url` 是**下单时按订单传入**的，不是商户平台里的一个全局回调列表。每笔订单可以带不同的 HTTPS 回调地址，微信只回调这笔订单指定的那个 URL。
+
+| 做法 | 说明 | 建议 |
+| --- | --- | --- |
+| 中央支付服务 | 所有订单的 `notify_url` 指向同一个服务，按 `out_trade_no` 路由到平台/租户 | **推荐** |
+| 按平台路径 | `https://pay.example.com/notify/wechat/platform-a` | 可行，路径白名单 |
+| 每个平台独立商户号 | 各自 appid、密钥和回调地址 | 隔离最好，账户和运维成本更高 |
+
+不要把商户私钥复制给每个平台。中央服务验签、更新支付订单后，再用签名 webhook 或 MQ 把事件分发给各平台。
+
+注意：
+
+- `notify_url` 必须是公网可达的 HTTPS 地址；按微信文档不要携带查询参数，用路径区分平台更稳妥。
+- `notify_url` 必须由服务端配置或白名单生成，不能接受用户输入，避免把签名订单数据发到第三方。
+- 同一商户绑定多个 appid 时，回调里的 `appid` 不同；`PaymentClient` 绑定单一 appid，需要为每个 appid 建客户端，或按 `appid` 路由到对应配置。
+- 退款也可以单独指定 `notify_url`：本库 `RefundRequest.notify_url` 优先，否则使用配置里的默认值。
+- 无论 URL 怎么分，回调仍必须校验 `out_trade_no`、金额、商户号/appid；不能只信 URL 里的平台标识。
+
 ## License
 
 MIT
