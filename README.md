@@ -335,14 +335,116 @@ uv run --env-file .env uvicorn --factory examples.fastapi_app:create_app --reloa
 
 二维码由 `segno` 在服务端生成，不依赖外部 CDN；安装 `.[examples]` 即可。
 
-## 接入其他项目
+## 接入业务系统（以 super-aigc 为例）
 
-1. 只依赖 `src/pypay`，不要把 FastAPI、SQLite 或业务表带进核心模块。
-2. 在自己的订单表中保存 `out_trade_no`、金额（分）、渠道和状态。
-3. 回调入口读取原始请求体，调用 `parse_notification`。
-4. 在自己的数据库事务中先写通知唯一键，再更新订单和发货状态。
-5. 定时任务扫描待支付订单，调用 `query_payment` 补偿。
-6. 浏览器跳转页只展示结果，不修改订单状态。
+### 先给结论
+
+**不要在生产环境让 super-aigc 把用户直接跳转到本项目的验证页（`examples/static/index.html`）来收款。**
+
+验证页是本地联调工具，不是收银台产品：
+
+- 没有登录、权限和限流，任何人都能调用 `/orders`。
+- 金额和商品描述由浏览器提交，服务端没有和 super-aigc 的订单校验。
+- 订单、回调和发货都落在示例 SQLite 里，super-aigc 不知道支付结果，无法据此开通额度。
+- 演示模式会绕过回调验签，`/demo/pay` 可以直接把订单改成已支付。
+
+推荐的接入方式：
+
+| 方式 | 适用场景 | 做法 |
+| --- | --- | --- |
+| **A. 后端嵌入（推荐）** | super-aigc 自己收款、自己发货 | super-aigc 后端依赖 `pypay`，自己建单、存单、收回调、发货；前端只复用二维码展示逻辑 |
+| **B. 独立收银台** | 支付需要独立部署、多个业务共用 | 把示例升级成有鉴权、订单绑定和回调转发的独立服务；super-aigc 创建订单后跳转，支付结果回传 super-aigc |
+| C. 直接跳转示例页 | 只用于本地演示 | **不可用于生产** |
+
+页面本身可以保留并演进成生产收银台，但**订单、金额、回调和发货必须回到 super-aigc 自己的后端**，不能只做一个跳转。
+
+### 方式 A：在 super-aigc 后端嵌入 pypay
+
+1. 安装依赖（同一仓库内可直接用 path 依赖）：
+
+   ```bash
+   uv add --editable ../pypay
+   # 或 pip install -e ../pypay
+   ```
+
+2. 在 super-aigc 的部署环境配置 `PYPAY_CHANNELS`、`PYPAY_WECHAT_*`、`PYPAY_ALIPAY_*`。`PYPAY_WECHAT_NOTIFY_URL` 必须指向 super-aigc 自己的公网 HTTPS 接口，例如：
+
+   ```text
+   https://api.super-aigc.example/pay/notify/wechat
+   ```
+
+3. 下单时先写自己的订单，再调用 pypay；金额以服务端订单为准，绝不接受前端传入的金额：
+
+   ```python
+   from pypay import AsyncPaymentClient, CreatePaymentRequest
+
+   pay = AsyncPaymentClient.from_env()
+
+
+   async def start_recharge(user_id: int, plan_id: int) -> str:
+       order = await db.create_order(user_id=user_id, plan_id=plan_id)  # 金额由套餐决定
+       result = await pay.create_payment(
+           CreatePaymentRequest(
+               out_trade_no=order.out_trade_no,
+               amount_fen=order.amount_fen,
+               description=f"super-aigc 充值 {order.out_trade_no}",
+           )
+       )
+       await db.save_payment_payload(order.out_trade_no, result.qr_code_url, result.form_html)
+       return order.out_trade_no
+   ```
+
+4. 前端（或 super-aigc 的收银页）只负责展示：
+
+   - 微信：把 `qr_code_url` 渲染成二维码，例如复用示例的 `/qr.svg?data=...`，或用前端二维码库。
+   - 支付宝：把 `form_html` 放到新窗口/iframe 提交，或跳转到表单页。
+   - 轮询 super-aigc 自己的 `GET /orders/{out_trade_no}` 展示状态；不要用浏览器跳转判定成功。
+
+5. 回调入口必须读取原始请求体，验签后在**同一个数据库事务**里去重、更新订单、发货：
+
+   ```python
+   from pypay import NotificationEvent
+
+
+   @app.post("/pay/notify/wechat")
+   async def wechat_notify(request: Request):
+       raw = await request.body()
+       notification = await pay.parse_notification(request.headers, raw)
+
+       async with db.transaction():
+           if not await db.insert_notification_once(notification):
+               return {"code": "SUCCESS", "message": "成功"}  # 重复回调直接成功
+           order = await db.get_order_for_update(notification.out_trade_no)
+           if order is None:
+               raise HTTPException(status_code=404)
+           notification.assert_matches(order.out_trade_no, order.amount_fen)
+           if notification.event_type is NotificationEvent.PAYMENT_SUCCEEDED:
+               await db.mark_paid_and_fulfill(order, notification)  # 只执行一次
+       return {"code": "SUCCESS", "message": "成功"}
+   ```
+
+   支付宝回调返回 `success` / `failure`，入口逻辑相同。
+
+6. 定时任务扫描 `pending` 订单，调用 `query_payment` 补偿漏通知；网络超时不要直接判失败，先按原订单号查单。浏览器跳转（`return_url`）只展示结果，不修改订单状态。
+
+### 方式 B：把示例升级成独立收银台
+
+如果后续确实要把这个页面独立部署成收银台，至少补齐：
+
+- [ ] 关闭 `PYPAY_DEMO_MODE`，删除或禁用 `/demo/pay`。
+- [ ] `/orders` 增加鉴权；金额、商品和订单号由服务端或 super-aigc 决定，不能由浏览器提交。
+- [ ] 收银台订单与 super-aigc 业务订单一一绑定，回调后通过直接写库或签名 webhook 通知 super-aigc 发货。
+- [ ] 订单表、通知唯一键、事务和发货幂等（参考 `examples/db.py`）。
+- [ ] 公网 HTTPS 回调地址、验签、金额/渠道/订单校验、请求体大小限制。
+- [ ] 主动查单补偿、对账任务、退款流程。
+- [ ] HTTPS、限流、告警、日志脱敏、密钥管理和轮换。
+- [ ] 不暴露 `/docs`、调试端点或示例数据库。
+
+### 一句话选择
+
+- super-aigc 自己发货：**方式 A**，pypay 当库用，页面 UI 只作为前端参考。
+- 多个业务共用一个支付服务：**方式 B**，先把示例改造成有鉴权和订单绑定的独立服务。
+- 只是本地看二维码/走通流程：可以用验证页，但不要对公网开放，也不要接真实收款。
 
 ## 安全清单
 
@@ -401,7 +503,7 @@ uv run --env-file .env uvicorn --factory examples.fastapi_app:create_app --reloa
 - 示例的 `reconcile.py` 只扫描 `pending` 订单；已支付订单上的退款漏通知需要通过退款单记录和 `query_refund` 单独对账。
 - `PaymentClient` 绑定单一渠道和单一商户账户；多渠道请分别创建客户端。
 - 示例使用 SQLite，生产环境应替换为项目自己的数据库和事务方案。
-- 示例 `/orders` 和前端验证台没有登录、权限和限流；生产环境必须在业务层补齐，或不要暴露该页面。
+- 示例 `/orders` 和前端验证台没有登录、权限和限流；生产环境必须在业务层补齐，或不要暴露该页面（见「接入业务系统」）。
 - 演示模式绕过验签，仅用于本地 UI/流程验证，不能用于任何真实收款场景。
 - 示例允许客户端传入 `out_trade_no`；生产环境建议由服务端生成，避免订单号被猜测或复用。
 
