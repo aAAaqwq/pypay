@@ -268,7 +268,7 @@ notification.assert_matches(
 注意：
 
 - 退款通知的 `status` 只有在**全额退款**时才是 `refunded`；部分退款仍是 `paid`，业务应使用 `refund_amount_fen` 判断退款金额。
-- 微信退款金额是**单笔**退款金额，支付宝 `refund_fee` 是**累计**退款金额；示例 `examples/db.py` 已分别处理。
+- 微信退款金额是**单笔**退款金额，支付宝 `refund_fee` 是**累计**退款金额。支付宝退款应以 `refund()` 同步响应和 `query_refund` 对账为准，不能仅凭异步通知里的 `refund_fee` 判断单笔退款完成。
 - 支付宝 `WAIT_BUYER_PAY` 会映射为 `payment.pending`；微信默认只在支付成功/关闭时推送。
 - 业务逻辑只依赖统一字段；`provider_data` 不建议参与发货判断，渠道字段可能变化。
 
@@ -344,7 +344,7 @@ uv run --env-file .env uvicorn --factory examples.fastapi_app:create_app --reloa
 1. 插入通知记录；唯一约束冲突说明是重复回调，直接返回成功。
 2. 按 `out_trade_no` 读取订单，校验渠道和金额。
 3. 支付成功通知将订单更新为 `paid`；如果此前已收到全额退款则保持 `refunded` 且不发货，部分退款则正常记 `fulfilled_at`。
-4. 退款通知先到也不会丢：微信按单笔增量累计，支付宝按累计值取最大值，并限制不超过订单金额。
+4. 微信退款通知按单笔增量累计；支付宝异步通知中的 `refund_fee` 是累计值，退款最终以 `refund()` 同步响应和 `query_refund` 对账为准。
 5. 任何校验失败都会回滚，包括通知记录的插入。
 
 这样即使渠道重复投递或并发投递，发货动作只会发生一次。
