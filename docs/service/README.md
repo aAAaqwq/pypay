@@ -63,6 +63,7 @@ src/pypay_service/
 ├── api_admin.py           # /admin/*
 ├── web_*.py               # 收银台/管理台 HTML
 ├── client.py              # 业务侧同步/异步客户端 + webhook 验签
+├── docs_view.py           # 管理后台 Markdown 文档发现与渲染
 └── cli.py                 # migrate/create-project/worker/serve
 ```
 
@@ -100,6 +101,8 @@ uv pip install -e ".[service,dev]"
 | `PYPAY_SERVICE_MASTER_KEY` | 32 字节密钥，用于加密项目 API/通知密钥；支持 `base64:`、`hex:` 或 64 位 hex |
 | `PYPAY_SERVICE_ADMIN_USERNAME` / `PASSWORD` | 管理后台管理员账号 |
 | `PYPAY_SERVICE_VIEWER_USERNAME` / `PASSWORD` | 可选，只读账号 |
+| `PYPAY_SERVICE_ADMIN_SESSION_SECONDS` | 可选，HTML 登录会话有效期，默认 28800 秒 |
+| `PYPAY_SERVICE_DOCS_DIR` | 可选，管理后台“文档”页读取的 Markdown 目录 |
 
 ### 渠道账户
 
@@ -203,16 +206,34 @@ pending ──支付成功──► paid ──累计退款=全额──► refu
 - 业务 webhook：`HMAC-SHA256(notify_secret, timestamp + "." + raw_body)`，请求头带 `X-Pypay-Signature: sha256=...`。
 - SSRF：项目通知/返回地址在配置时校验；投递时解析 DNS，拒绝私网/保留地址；不跟随重定向。
 - 密钥：项目 API/通知密钥用 master key AES-GCM 加密存储；页面只在创建/轮换时显示一次；日志不记录密钥或完整回调体。
-- 管理后台：HTTP Basic + admin/viewer 角色 + 双提交 CSRF + 写操作审计。生产建议放在 HTTPS、VPN 或现有 SSO 之后。
+- 管理后台：`/admin/login` 会话登录（HMAC 签名 HttpOnly cookie）+ admin/viewer 角色 + 双提交 CSRF + 写操作审计；同时保留 HTTP Basic 供脚本使用。生产建议放在 HTTPS、VPN 或现有 SSO 之后。
 - 响应头：CSP（nonce 脚本）、`X-Frame-Options: DENY`、`X-Content-Type-Options: nosniff`、`Referrer-Policy: no-referrer`、HSTS（HTTPS 时）。
 
 ## 管理后台
+
+访问 `/admin` 会自动跳转到 `/admin/login`。账号密码来自环境变量：
+
+- `PYPAY_SERVICE_ADMIN_USERNAME` / `PYPAY_SERVICE_ADMIN_PASSWORD`：可写管理员。
+- `PYPAY_SERVICE_VIEWER_USERNAME` / `PYPAY_SERVICE_VIEWER_PASSWORD`：可选只读账号。
+
+登录成功后写入 `HttpOnly`、`SameSite=Strict` 的签名会话 cookie；修改环境变量中的密码后，旧会话立即失效。`/v1` 不适用这套登录，管理后台同时保留 HTTP Basic，便于脚本或旧工具访问。
 
 - 项目：创建、停用/启用、通知地址、返回地址白名单、渠道账户、API/通知密钥轮换。
 - 渠道账户：添加/启停，显示环境变量前缀；凭据仍从环境读取。
 - 订单：按项目/状态/业务单号筛选；订单快照、attempt、退款、渠道原始通知、事件与投递历史。
 - 人工操作：主动查单、关闭未支付订单、手动重发事件、权限受控退款。
 - 审计：项目/渠道/退款/重发/轮换等写操作。
+- 文档：读取 `PYPAY_SERVICE_DOCS_DIR` 下的 Markdown，按目录自动生成导航。
+
+### 添加文档
+
+把 `.md` 文件放进 `PYPAY_SERVICE_DOCS_DIR`（默认 `./docs/service`）即可，**不需要改代码或重启**：
+
+- 第一个 `# 标题` 作为页面标题；没有标题时用文件名。
+- 子目录会出现在导航中，例如 `ops/runbook.md` → `/admin/docs/ops/runbook`。
+- 支持表格、代码块和相对链接；`[部署](deployment.md)` 会自动改写为 `/admin/docs/deployment`。
+- 以 `.` 或 `_` 开头的文件/目录不会展示；单个文件上限 512 KiB。
+- 文档只对已登录的管理员/只读账号可见。
 
 ## 测试
 

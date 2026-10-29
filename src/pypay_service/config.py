@@ -143,6 +143,9 @@ class ServiceConfig:
     admin_password: str = field(repr=False)
     viewer_username: str | None = None
     viewer_password: str | None = field(default=None, repr=False)
+    admin_session_seconds: int = 8 * 3600
+    secure_cookies: bool | None = None
+    service_docs_dir: Path | None = None
     allow_http_urls: bool = False
     allow_private_urls: bool = False
     enable_docs: bool = False
@@ -172,8 +175,16 @@ class ServiceConfig:
             raise ServiceConfigError("set both viewer username and password, or neither")
         if self.viewer_password is not None and len(self.viewer_password) < 8:
             raise ServiceConfigError("viewer password must be at least 8 characters")
+        if self.admin_session_seconds < 60:
+            raise ServiceConfigError("admin session lifetime must be at least 60 seconds")
         if len(self.master_key) != 32:
             raise ServiceConfigError("master key must be 32 bytes")
+        if self.secure_cookies is None:
+            object.__setattr__(
+                self,
+                "secure_cookies",
+                urlsplit(self.public_base_url).scheme == "https",
+            )
 
     @property
     def admin_credentials(self) -> tuple[AdminCredentials, ...]:
@@ -185,10 +196,6 @@ class ServiceConfig:
                 AdminCredentials(self.viewer_username, self.viewer_password, "viewer")
             )
         return tuple(credentials)
-
-    @property
-    def secure_cookies(self) -> bool:
-        return urlsplit(self.public_base_url).scheme == "https"
 
     @property
     def database_file(self) -> Path:
@@ -206,6 +213,13 @@ class ServiceConfig:
             raise ServiceConfigError(str(exc)) from exc
         viewer_username = env.get("PYPAY_SERVICE_VIEWER_USERNAME") or None
         viewer_password = env.get("PYPAY_SERVICE_VIEWER_PASSWORD") or None
+        docs_raw = env.get("PYPAY_SERVICE_DOCS_DIR")
+        if docs_raw is None:
+            service_docs_dir: Path | None = Path("docs/service")
+        elif docs_raw.strip():
+            service_docs_dir = Path(docs_raw).expanduser()
+        else:
+            service_docs_dir = None
         return cls(
             database_path=Path(database_raw),
             public_base_url=_parse_base_url(
@@ -223,6 +237,13 @@ class ServiceConfig:
             ),
             viewer_username=viewer_username,
             viewer_password=viewer_password,
+            admin_session_seconds=_require_int(
+                env.get("PYPAY_SERVICE_ADMIN_SESSION_SECONDS"),
+                "PYPAY_SERVICE_ADMIN_SESSION_SECONDS",
+                8 * 3600,
+                minimum=60,
+            ),
+            service_docs_dir=service_docs_dir,
             allow_http_urls=_require_bool(
                 env.get("PYPAY_SERVICE_ALLOW_HTTP_URLS"), "PYPAY_SERVICE_ALLOW_HTTP_URLS"
             ),

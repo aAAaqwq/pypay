@@ -11,6 +11,7 @@
 在此之上提供 `src/pypay_service/`：面向多个业务网站的统一支付服务，包含项目/凭证管理、统一下单、动态收银台、渠道回调、退款、签名 webhook、outbox 重试和独立 worker。业务网站只通过服务端 HMAC API 接入，浏览器不接触商户密钥。原有 `pypay` 库 API 保持兼容。
 
 - 服务文档入口：[`docs/service/README.md`](docs/service/README.md)
+- 管理后台：`/admin/login` 登录页，账号来自环境变量；`/admin/docs` 自动展示 `PYPAY_SERVICE_DOCS_DIR` 下的 Markdown
 - 网站接入：[`docs/service/integration.md`](docs/service/integration.md)
 - 部署与回滚：[`docs/service/deployment.md`](docs/service/deployment.md)
 - 旧回调迁移：[`docs/service/migration.md`](docs/service/migration.md)

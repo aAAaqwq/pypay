@@ -11,6 +11,7 @@ from pypay import Channel
 
 from .config import ChannelAccountSeed
 from .deps import get_ctx, read_form, require_admin, require_admin_write, validate_csrf
+from .docs_view import discover_docs, find_doc, render_markdown
 from .errors import ServiceError
 from .payments_service import (
     close_order,
@@ -44,11 +45,20 @@ from .repo_projects import (
     list_projects,
     upsert_channel_account,
 )
-from .security import AdminPrincipal
+from .security import (
+    ADMIN_SESSION_COOKIE,
+    AdminPrincipal,
+    authenticate_admin_credentials,
+    create_admin_session,
+    verify_admin_session,
+)
 from .web_admin import (
     render_audit,
     render_channels,
     render_dashboard,
+    render_doc,
+    render_docs_index,
+    render_login,
     render_order_detail,
     render_orders,
     render_project_created,
@@ -180,6 +190,133 @@ def _render_project_page(
         error=error,
     )
     return HTMLResponse(html, headers={"Cache-Control": "no-store"})
+
+
+@router.get("/login", response_class=HTMLResponse)
+async def admin_login_page(request: Request) -> Response:
+    context = get_ctx(request)
+    principal = verify_admin_session(
+        context.config.master_key,
+        context.config.admin_credentials,
+        request.cookies.get(ADMIN_SESSION_COOKIE),
+        now=context.clock().timestamp(),
+    )
+    if principal is not None:
+        return RedirectResponse("/admin", status_code=303)
+    return HTMLResponse(
+        render_login(nonce=_nonce(request), csrf=_csrf(request)),
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@router.post("/login")
+async def admin_login(request: Request) -> Response:
+    context = get_ctx(request)
+    form = await read_form(request)
+    try:
+        validate_csrf(request, form.get("csrf_token"))
+    except HTTPException:
+        return HTMLResponse(
+            render_login(
+                nonce=_nonce(request),
+                csrf=_csrf(request),
+                error="页面已过期，请刷新后重试",
+            ),
+            status_code=403,
+            headers={"Cache-Control": "no-store"},
+        )
+    username = str(form.get("username") or "").strip()
+    password = str(form.get("password") or "")
+    principal = authenticate_admin_credentials(username, password, context.config.admin_credentials)
+    if principal is None:
+        return HTMLResponse(
+            render_login(
+                nonce=_nonce(request),
+                csrf=_csrf(request),
+                error="账号或密码不正确",
+                username=username,
+            ),
+            status_code=401,
+            headers={"Cache-Control": "no-store"},
+        )
+    token = create_admin_session(
+        context.config.master_key,
+        context.config.admin_credentials,
+        principal,
+        ttl_seconds=context.config.admin_session_seconds,
+        now=context.clock().timestamp(),
+    )
+    response = RedirectResponse("/admin", status_code=303)
+    response.set_cookie(
+        ADMIN_SESSION_COOKIE,
+        token,
+        max_age=context.config.admin_session_seconds,
+        httponly=True,
+        samesite="strict",
+        secure=context.config.secure_cookies,
+        path="/admin",
+    )
+    return response
+
+
+@router.post("/logout")
+async def admin_logout(request: Request) -> Response:
+    form = await read_form(request)
+    validate_csrf(request, form.get("csrf_token"))
+    response = RedirectResponse("/admin/login", status_code=303)
+    response.delete_cookie(ADMIN_SESSION_COOKIE, path="/admin")
+    response.delete_cookie("pypay_admin_csrf", path="/admin")
+    return response
+
+
+@router.get("/docs", response_class=HTMLResponse)
+async def admin_docs_index(
+    request: Request,
+    principal: AdminPrincipal = Depends(require_admin),
+) -> Response:
+    context = get_ctx(request)
+    entries = discover_docs(context.config.service_docs_dir)
+    docs_dir = str(context.config.service_docs_dir or "未配置 PYPAY_SERVICE_DOCS_DIR")
+    return HTMLResponse(
+        render_docs_index(
+            principal=principal,
+            nonce=_nonce(request),
+            csrf=_csrf(request),
+            entries=entries,
+            docs_dir=docs_dir,
+        ),
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@router.get("/docs/{slug:path}", response_class=HTMLResponse)
+async def admin_docs_page(
+    slug: str,
+    request: Request,
+    principal: AdminPrincipal = Depends(require_admin),
+) -> Response:
+    context = get_ctx(request)
+    entries = discover_docs(context.config.service_docs_dir)
+    normalized = slug.removesuffix(".md")
+    entry = find_doc(entries, normalized)
+    if entry is None:
+        raise HTTPException(status_code=404, detail="doc not found")
+    try:
+        text = entry.path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise HTTPException(status_code=404, detail="doc not readable") from exc
+    content = render_markdown(text, slug=entry.slug, entries=entries)
+    return HTMLResponse(
+        render_doc(
+            principal=principal,
+            nonce=_nonce(request),
+            csrf=_csrf(request),
+            entries=entries,
+            entry=entry,
+            content_html=content,
+        ),
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @router.get("", response_class=HTMLResponse)

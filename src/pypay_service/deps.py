@@ -9,9 +9,11 @@ from .errors import AuthenticationError
 from .models import ProjectAuth
 from .projects_service import authenticate_project
 from .security import (
+    ADMIN_SESSION_COOKIE,
     AdminPrincipal,
     authenticate_admin,
     constant_time_matches,
+    verify_admin_session,
 )
 
 
@@ -90,9 +92,16 @@ async def require_project(request: Request) -> ProjectAuth:
 
 async def require_admin(request: Request) -> AdminPrincipal:
     context = get_ctx(request)
-    principal = authenticate_admin(
-        request.headers.get("authorization"), context.config.admin_credentials
+    principal = verify_admin_session(
+        context.config.master_key,
+        context.config.admin_credentials,
+        request.cookies.get(ADMIN_SESSION_COOKIE),
+        now=context.clock().timestamp(),
     )
+    if principal is None:
+        principal = authenticate_admin(
+            request.headers.get("authorization"), context.config.admin_credentials
+        )
     if principal is None:
         raise HTTPException(
             status_code=401,

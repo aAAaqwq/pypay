@@ -145,6 +145,9 @@ def _seed() -> tuple[ServiceConfig, Database, SecretBox, object, object]:
         admin_password="demo-admin-password",
         viewer_username="viewer",
         viewer_password="demo-viewer-password",
+        admin_session_seconds=8 * 3600,
+        secure_cookies=False,
+        service_docs_dir=Path(__file__).resolve().parent.parent / "docs" / "service",
         allow_http_urls=True,
         allow_private_urls=True,
         channel_accounts=(

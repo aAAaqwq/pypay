@@ -217,6 +217,7 @@ def build_env(
     tmp_path: Path,
     *,
     project_channels: dict[str, dict[Channel, str]] | None = None,
+    service_docs_dir: Path | None = None,
 ) -> ServiceEnv:
     clock = Clock()
     seeds = (
@@ -241,6 +242,7 @@ def build_env(
         admin_password="admin-password",
         viewer_username="viewer",
         viewer_password="viewer-password",
+        service_docs_dir=service_docs_dir,
         outbox_max_attempts=3,
         outbox_backoff_base_seconds=10,
         outbox_lease_seconds=60,

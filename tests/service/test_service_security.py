@@ -8,13 +8,16 @@ import pytest
 from pypay_service.config import ServiceConfig, ServiceConfigError
 from pypay_service.security import (
     AdminCredentials,
+    AdminPrincipal,
     SecretBox,
     SecurityError,
     authenticate_admin,
     cashier_form_token,
+    create_admin_session,
     parse_basic_authorization,
     resolve_public_host,
     validate_outbound_url,
+    verify_admin_session,
     verify_cashier_form_token,
 )
 
@@ -122,3 +125,22 @@ def test_service_base_url_must_be_root_https_or_http() -> None:
             admin_username="admin",
             admin_password="admin-password",
         )
+
+
+def test_admin_session_is_signed_expires_and_follows_credentials() -> None:
+    key = b"k" * 32
+    credentials = (
+        AdminCredentials("admin", "password-one", "admin"),
+        AdminCredentials("viewer", "viewer-password", "viewer"),
+    )
+    principal = AdminPrincipal("admin", "admin")
+    token = create_admin_session(key, credentials, principal, ttl_seconds=60, now=1_000)
+    assert verify_admin_session(key, credentials, token, now=1_000) == principal
+    assert verify_admin_session(key, credentials, token, now=1_061) is None
+    assert verify_admin_session(b"x" * 32, credentials, token, now=1_000) is None
+
+    tampered = token[:-1] + ("0" if token[-1] != "0" else "1")
+    assert verify_admin_session(key, credentials, tampered, now=1_000) is None
+
+    changed = (AdminCredentials("admin", "password-two", "admin"),)
+    assert verify_admin_session(key, changed, token, now=1_000) is None

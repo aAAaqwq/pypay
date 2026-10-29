@@ -212,11 +212,121 @@ ADMIN_CSS = """
 .subnav { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
 .subnav a { padding: 6px 10px; border-radius: 999px; border: 1px solid var(--line); text-decoration: none; font-size: 13px; }
 .subnav a.active { background: var(--ink); color: var(--accent-ink); border-color: var(--ink); }
+.admin-user {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  padding: 0 12px; color: #b9b0a2;
+}
+.logout-form { margin: 0; }
+.logout-btn {
+  border: 1px solid rgba(255,255,255,.18); background: transparent; color: #d8d0c1;
+  border-radius: 8px; padding: 4px 9px; font-size: 12px; cursor: pointer;
+}
+.logout-btn:hover { background: rgba(255,255,255,.09); color: #fff; }
+.doc-layout { display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: 22px; align-items: start; }
+.doc-nav { position: sticky; top: 20px; padding: 12px; }
+.doc-nav a {
+  display: block; padding: 7px 10px; border-radius: 8px; text-decoration: none;
+  font-size: 13px; color: var(--ink-soft);
+}
+.doc-nav a:hover, .doc-nav a.active { background: var(--paper-2); color: var(--ink); }
+.doc-body { padding: clamp(20px, 3vw, 34px); line-height: 1.7; }
+.doc-body h1 {
+  font-family: var(--text-display); font-size: clamp(28px, 3.6vw, 40px);
+  margin: 0 0 18px; letter-spacing: -.01em;
+}
+.doc-body h2 {
+  font-family: var(--text-display); font-size: 24px; margin: 30px 0 12px;
+  padding-top: 10px; border-top: 1px solid var(--line);
+}
+.doc-body h3 { font-size: 18px; margin: 22px 0 8px; }
+.doc-body p, .doc-body li { color: var(--ink-soft); }
+.doc-body code {
+  font-family: var(--text-mono); font-size: .9em; background: var(--paper-2);
+  padding: 2px 5px; border-radius: 5px;
+}
+.doc-body pre { background: #201f1b; color: #f1ebdf; padding: 16px; border-radius: 10px; overflow: auto; }
+.doc-body pre code { background: none; padding: 0; color: inherit; }
+.doc-body table { margin: 16px 0; }
+.doc-body th { background: var(--paper-2); }
+.doc-body blockquote {
+  margin: 16px 0; padding: 10px 14px; border-left: 3px solid var(--gold);
+  background: #fdf6e4; color: #6b4a0d;
+}
+.doc-body a { text-decoration: underline; }
+@media (max-width: 860px) {
+  .doc-layout { grid-template-columns: 1fr; }
+  .doc-nav { position: static; }
+}
 @media (max-width: 860px) {
   .admin-shell { grid-template-columns: 1fr; }
   .admin-side { position: static; height: auto; display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
   .admin-side .nav-label { margin: 0 8px; }
   .form-grid { grid-template-columns: 1fr; }
+}
+"""
+
+LOGIN_CSS = """
+.login-shell {
+  min-height: 100vh;
+  display: grid;
+  grid-template-columns: minmax(0, 1.05fr) minmax(360px, .95fr);
+}
+.login-brand {
+  position: relative; overflow: hidden; background: #1b2a26; color: #f1ebdf;
+  padding: clamp(28px, 6vw, 72px); display: flex; flex-direction: column;
+  justify-content: space-between; gap: 40px;
+}
+.login-brand::before {
+  content: ""; position: absolute; inset: -18% -12% auto auto; width: 560px; height: 560px;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(176,122,26,.3), transparent 68%);
+}
+.login-brand::after {
+  content: ""; position: absolute; inset: 0;
+  background:
+    repeating-linear-gradient(90deg, rgba(255,255,255,.045) 0 1px, transparent 1px 64px),
+    repeating-linear-gradient(0deg, rgba(255,255,255,.035) 0 1px, transparent 1px 64px);
+  mask-image: linear-gradient(140deg, transparent 8%, #000 55%, transparent 96%);
+}
+.login-brand > * { position: relative; z-index: 1; }
+.login-brand .brand { color: #f1ebdf; }
+.login-brand .brand-mark { background: var(--accent); }
+.login-kicker {
+  font-family: var(--text-mono); font-size: 11px; letter-spacing: .18em;
+  text-transform: uppercase; color: #a99f8e;
+}
+.login-brand h1 {
+  font-family: var(--text-display); font-size: clamp(38px, 5.2vw, 72px);
+  line-height: 1.02; letter-spacing: -.03em; margin: 18px 0 16px; max-width: 14ch;
+}
+.login-brand .lede { color: #c9c1b2; max-width: 36ch; font-size: clamp(14px, 1.4vw, 17px); }
+.login-points { list-style: none; padding: 0; margin: 34px 0 0; display: grid; gap: 13px; }
+.login-points li {
+  display: grid; grid-template-columns: 16px 1fr; gap: 10px;
+  color: #d8d0c1; font-size: 14px; align-items: start;
+}
+.login-points li::before {
+  content: ""; width: 7px; height: 7px; margin-top: 7px; border-radius: 2px;
+  background: var(--gold); transform: rotate(45deg);
+}
+.login-foot { font-size: 12px; color: #8f8678; letter-spacing: .02em; }
+.login-panel { display: grid; place-items: center; padding: clamp(24px, 5vw, 64px); }
+.login-card { width: min(420px, 100%); padding: clamp(24px, 4vw, 38px); }
+.login-card h2 { font-family: var(--text-display); font-size: 30px; margin: 0 0 6px; }
+.login-card .sub { color: var(--muted); font-size: 14px; margin: 0 0 24px; }
+.login-card label.field > span { font-size: 12px; letter-spacing: .04em; text-transform: uppercase; }
+.login-submit { width: 100%; margin-top: 8px; }
+.login-meta {
+  display: flex; justify-content: space-between; gap: 12px; margin-top: 18px;
+  font-size: 12px; color: var(--muted);
+}
+@media (max-width: 860px) {
+  .login-shell { grid-template-columns: 1fr; }
+  .login-brand { padding: 28px; min-height: auto; }
+  .login-brand h1 { font-size: 38px; margin: 12px 0 10px; }
+  .login-points, .login-foot { display: none; }
+  .login-panel { padding: 24px 18px 48px; }
+  .login-card { box-shadow: none; border: 0; background: transparent; padding: 0; }
 }
 """
 
@@ -252,6 +362,7 @@ def _nav(active: str | None) -> str:
         ("channels", "/admin/channels", "渠道账户"),
         ("orders", "/admin/orders", "支付订单"),
         ("audit", "/admin/audit", "审计日志"),
+        ("docs", "/admin/docs", "文档"),
     ]
     links = []
     for key, href, label in items:
@@ -267,10 +378,14 @@ def page_layout(
     nonce: str,
     css: str = "",
     admin: bool = False,
+    login: bool = False,
     principal: object | None = None,
     active: str | None = None,
+    csrf: str = "",
 ) -> str:
-    if admin:
+    if login:
+        shell = body
+    elif admin:
         username = getattr(principal, "username", "")
         role = getattr(principal, "role", "")
         shell = f"""
@@ -283,8 +398,12 @@ def page_layout(
     <div class="nav-label">运营</div>
     {_nav(active)}
     <div class="nav-label">身份</div>
-    <div class="small" style="padding: 0 12px; color:#b9b0a2">
-      {e(username)} · {e(role)}
+    <div class="admin-user">
+      <span class="small">{e(username)} · {e(role)}</span>
+      <form method="post" action="/admin/logout" class="logout-form">
+        <input type="hidden" name="csrf_token" value="{e(csrf)}">
+        <button class="logout-btn" type="submit">退出</button>
+      </form>
     </div>
   </aside>
   <main class="admin-main">{body}</main>

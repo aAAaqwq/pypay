@@ -5,6 +5,7 @@ import binascii
 import hashlib
 import hmac
 import ipaddress
+import json
 import secrets
 import socket
 import time
@@ -15,6 +16,8 @@ from urllib.parse import urlsplit
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 _SECRET_CONTEXT = b"pypay-service-secret-v1"
+_ADMIN_SESSION_CONTEXT = b"pypay-admin-session-v1"
+ADMIN_SESSION_COOKIE = "pypay_admin_session"
 _IPAddress = ipaddress.IPv4Address | ipaddress.IPv6Address
 
 
@@ -156,6 +159,17 @@ class AdminCredentials:
     role: str
 
 
+def authenticate_admin_credentials(
+    username: str, password: str, credentials: Iterable[AdminCredentials]
+) -> AdminPrincipal | None:
+    for credential in credentials:
+        if secrets.compare_digest(username, credential.username) and secrets.compare_digest(
+            password, credential.password
+        ):
+            return AdminPrincipal(username=credential.username, role=credential.role)
+    return None
+
+
 def authenticate_admin(
     authorization: str | None, credentials: Iterable[AdminCredentials]
 ) -> AdminPrincipal | None:
@@ -163,11 +177,104 @@ def authenticate_admin(
     if parsed is None:
         return None
     username, password = parsed
+    return authenticate_admin_credentials(username, password, credentials)
+
+
+def _admin_session_key(master_key: bytes) -> bytes:
+    return hmac.new(master_key, _ADMIN_SESSION_CONTEXT, hashlib.sha256).digest()
+
+
+def _admin_credential_tag(master_key: bytes, credential: AdminCredentials) -> str:
+    material = f"{credential.username}\0{credential.password}\0{credential.role}".encode()
+    return hmac.new(_admin_session_key(master_key), material, hashlib.sha256).hexdigest()[:32]
+
+
+def create_admin_session(
+    master_key: bytes,
+    credentials: Iterable[AdminCredentials],
+    principal: AdminPrincipal,
+    *,
+    ttl_seconds: int,
+    now: float | None = None,
+) -> str:
+    credential = next(
+        (
+            candidate
+            for candidate in credentials
+            if candidate.username == principal.username and candidate.role == principal.role
+        ),
+        None,
+    )
+    if credential is None:
+        raise ValueError("admin principal has no matching credential")
+    issued = int(time.time() if now is None else now)
+    payload = {
+        "u": principal.username,
+        "r": principal.role,
+        "t": _admin_credential_tag(master_key, credential),
+        "iat": issued,
+        "exp": issued + ttl_seconds,
+        "n": secrets.token_hex(8),
+    }
+    encoded = (
+        base64.urlsafe_b64encode(
+            json.dumps(payload, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+        )
+        .rstrip(b"=")
+        .decode("ascii")
+    )
+    signature = hmac.new(
+        _admin_session_key(master_key), encoded.encode("ascii"), hashlib.sha256
+    ).hexdigest()
+    return f"v1.{encoded}.{signature}"
+
+
+def verify_admin_session(
+    master_key: bytes,
+    credentials: Iterable[AdminCredentials],
+    token: str | None,
+    *,
+    now: float | None = None,
+) -> AdminPrincipal | None:
+    if not token:
+        return None
+    parts = token.split(".")
+    if len(parts) != 3 or parts[0] != "v1":
+        return None
+    encoded, signature = parts[1], parts[2]
+    expected = hmac.new(
+        _admin_session_key(master_key), encoded.encode("ascii"), hashlib.sha256
+    ).hexdigest()
+    if not constant_time_matches(expected, signature):
+        return None
+    try:
+        raw = base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4))
+        payload = json.loads(raw)
+    except (ValueError, binascii.Error, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    username = payload.get("u")
+    role = payload.get("r")
+    tag = payload.get("t")
+    expires = payload.get("exp")
+    if (
+        not isinstance(username, str)
+        or not isinstance(role, str)
+        or not isinstance(tag, str)
+        or isinstance(expires, bool)
+        or not isinstance(expires, int)
+    ):
+        return None
+    current = int(time.time() if now is None else now)
+    if expires < current:
+        return None
     for credential in credentials:
-        if secrets.compare_digest(username, credential.username) and secrets.compare_digest(
-            password, credential.password
-        ):
-            return AdminPrincipal(username=credential.username, role=credential.role)
+        if credential.username != username or credential.role != role:
+            continue
+        if secrets.compare_digest(_admin_credential_tag(master_key, credential), tag):
+            return AdminPrincipal(username=username, role=role)
+        return None
     return None
 
 

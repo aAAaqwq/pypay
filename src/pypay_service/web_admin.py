@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 from typing import Any
+from urllib.parse import quote
 
+from .docs_view import DocEntry
 from .enums import AttemptStatus, OrderStatus
 from .models import (
     AuditEntry,
@@ -18,6 +20,7 @@ from .models import (
 from .timeutil import from_db
 from .web_common import (
     ADMIN_CSS,
+    LOGIN_CSS,
     e,
     fmt_dt,
     money,
@@ -64,6 +67,7 @@ def _admin_page(
     *,
     principal: Any,
     nonce: str,
+    csrf: str,
     active: str,
 ) -> str:
     return page_layout(
@@ -74,6 +78,7 @@ def _admin_page(
         admin=True,
         principal=principal,
         active=active,
+        csrf=csrf,
     )
 
 
@@ -152,7 +157,9 @@ def render_dashboard(
   </table></div>
 </section>
 """
-    return _admin_page("总览", body, principal=principal, nonce=nonce, active="dashboard")
+    return _admin_page(
+        "总览", body, principal=principal, nonce=nonce, csrf=csrf, active="dashboard"
+    )
 
 
 def render_projects(
@@ -181,7 +188,7 @@ def render_projects(
   </table></div>
 </section>
 """
-    return _admin_page("项目", body, principal=principal, nonce=nonce, active="projects")
+    return _admin_page("项目", body, principal=principal, nonce=nonce, csrf=csrf, active="projects")
 
 
 def render_project_new(
@@ -199,7 +206,9 @@ def render_project_new(
 {_head("新建项目")}
 <div class="warn-box">还没有启用的渠道账户。请先到 <a href="/admin/channels">渠道账户</a> 添加并启用账户。</div>
 """
-        return _admin_page("新建项目", body, principal=principal, nonce=nonce, active="projects")
+        return _admin_page(
+            "新建项目", body, principal=principal, nonce=nonce, csrf=csrf, active="projects"
+        )
     channels_html = _channel_selects(accounts, {})
     body = f"""
 {_head("新建项目", "创建后会显示一次 API 密钥与通知密钥", '<a class="btn secondary" href="/admin/projects">返回</a>')}
@@ -226,7 +235,9 @@ def render_project_new(
   </form>
 </section>
 """
-    return _admin_page("新建项目", body, principal=principal, nonce=nonce, active="projects")
+    return _admin_page(
+        "新建项目", body, principal=principal, nonce=nonce, csrf=csrf, active="projects"
+    )
 
 
 def render_project_created(
@@ -263,7 +274,9 @@ def render_project_created(
   </div>
 </section>
 """
-    return _admin_page("项目已创建", body, principal=principal, nonce=nonce, active="projects")
+    return _admin_page(
+        "项目已创建", body, principal=principal, nonce=nonce, csrf=csrf, active="projects"
+    )
 
 
 def render_project_detail(
@@ -364,7 +377,9 @@ def render_project_detail(
   <div style="margin-top:14px"><a class="btn secondary" href="/admin/orders?project_id={e(project.id)}">查看全部订单</a></div>
 </section>
 """
-    return _admin_page(project.name, body, principal=principal, nonce=nonce, active="projects")
+    return _admin_page(
+        project.name, body, principal=principal, nonce=nonce, csrf=csrf, active="projects"
+    )
 
 
 def render_channels(
@@ -424,7 +439,9 @@ def render_channels(
 </section>
 {add_form}
 """
-    return _admin_page("渠道账户", body, principal=principal, nonce=nonce, active="channels")
+    return _admin_page(
+        "渠道账户", body, principal=principal, nonce=nonce, csrf=csrf, active="channels"
+    )
 
 
 def render_orders(
@@ -474,7 +491,9 @@ def render_orders(
   </table></div>
 </section>
 """
-    return _admin_page("支付订单", body, principal=principal, nonce=nonce, active="orders")
+    return _admin_page(
+        "支付订单", body, principal=principal, nonce=nonce, csrf=csrf, active="orders"
+    )
 
 
 def render_order_detail(
@@ -642,7 +661,12 @@ def render_order_detail(
 </section>
 """
     return _admin_page(
-        f"订单 {order.business_order_no}", body, principal=principal, nonce=nonce, active="orders"
+        f"订单 {order.business_order_no}",
+        body,
+        principal=principal,
+        nonce=nonce,
+        csrf=csrf,
+        active="orders",
     )
 
 
@@ -669,8 +693,116 @@ def render_audit(
   </table></div>
 </section>
 """
-    return _admin_page("审计日志", body, principal=principal, nonce=nonce, active="audit")
+    return _admin_page(
+        "审计日志", body, principal=principal, nonce=nonce, csrf=csrf, active="audit"
+    )
 
 
 def _dt(value: str):
     return from_db(value)
+
+
+def render_login(*, nonce: str, csrf: str, error: str | None = None, username: str = "") -> str:
+    body = f"""
+<main class="login-shell">
+  <section class="login-brand" aria-labelledby="login-title">
+    <div>
+      <div class="brand">
+        <span class="brand-mark">PP</span>
+        <span class="brand-name">pypay 管理台</span>
+      </div>
+      <p class="login-kicker" style="margin:32px 0 0">Unified payment operations</p>
+      <h1 id="login-title">支付运营，<br>从一张账单开始。</h1>
+      <p class="lede">项目、渠道、订单、通知投递与业务确认状态集中在一个后台。</p>
+      <ul class="login-points">
+        <li>项目级凭证与渠道账户隔离</li>
+        <li>支付、投递、业务确认状态分开记录</li>
+        <li>退款和人工操作全部留痕</li>
+      </ul>
+    </div>
+    <div class="login-foot">pypay unified payment service</div>
+  </section>
+  <section class="login-panel">
+    <div class="card login-card">
+      <h2>登录管理台</h2>
+      <p class="sub">使用环境变量中配置的管理员或只读账号。</p>
+      {_flash(error, "error")}
+      <form method="post" action="/admin/login">
+        {_csrf(csrf)}
+        <label class="field"><span>账号</span>
+          <input type="text" name="username" value="{e(username)}" autocomplete="username"
+                 required autofocus>
+        </label>
+        <label class="field"><span>密码</span>
+          <input type="password" name="password" autocomplete="current-password" required>
+        </label>
+        <button class="btn accent login-submit" type="submit">进入管理台</button>
+      </form>
+      <div class="login-meta"><span>仅限授权运营人员</span><span>会话到期后需重新登录</span></div>
+    </div>
+  </section>
+</main>"""
+    return page_layout("登录 · pypay 管理台", body, nonce=nonce, css=LOGIN_CSS, login=True)
+
+
+def render_docs_index(
+    *,
+    principal: Any,
+    nonce: str,
+    csrf: str,
+    entries: list[DocEntry],
+    docs_dir: str,
+) -> str:
+    cards = "".join(
+        f'<a class="card section" href="/admin/docs/{quote(entry.slug, safe="/")}" '
+        f'style="display:block;text-decoration:none;margin-bottom:12px">'
+        f'<div class="small muted mono">{e(entry.slug)}.md</div>'
+        f'<h2 style="margin:6px 0 4px">{e(entry.title)}</h2>'
+        f'<p class="muted small" style="margin:0">{e(entry.excerpt)}</p></a>'
+        for entry in entries
+    )
+    empty = ""
+    if not entries:
+        empty = f"""
+<div class="warn-box" style="margin-bottom:16px">
+  当前文档目录没有可读取的 Markdown 文件：<span class="mono">{e(docs_dir)}</span>
+</div>
+<p class="muted">设置 <span class="mono">PYPAY_SERVICE_DOCS_DIR</span> 指向文档目录，或把
+<span class="mono">.md</span> 文件放进该目录。文件会自动出现在这里，无需改代码。</p>"""
+    body = f"""
+{_head("文档", "把 Markdown 文件放进文档目录即可自动出现在这里")}
+{empty}
+<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(min(320px,100%),1fr));gap:14px">
+  {cards}
+</div>
+<p class="small muted" style="margin-top:22px">
+  文档目录：<span class="mono">{e(docs_dir)}</span> · 支持子目录、表格、代码块和相对链接。
+</p>
+"""
+    return _admin_page("文档", body, principal=principal, nonce=nonce, csrf=csrf, active="docs")
+
+
+def render_doc(
+    *,
+    principal: Any,
+    nonce: str,
+    csrf: str,
+    entries: list[DocEntry],
+    entry: DocEntry,
+    content_html: str,
+) -> str:
+    def doc_link(item: DocEntry) -> str:
+        active = ' class="active"' if item.slug == entry.slug else ""
+        return f'<a href="/admin/docs/{quote(item.slug, safe="/")}"{active}>{e(item.title)}</a>'
+
+    nav = "".join(doc_link(item) for item in entries)
+    body = f"""
+{_head(entry.title, entry.slug + ".md", '<a class="btn secondary" href="/admin/docs">文档列表</a>')}
+<div class="doc-layout">
+  <nav class="card doc-nav" aria-label="文档目录">{nav}</nav>
+  <article class="card doc-body">{content_html}</article>
+</div>
+"""
+    return _admin_page(
+        entry.title, body, principal=principal, nonce=nonce, csrf=csrf, active="docs"
+    )

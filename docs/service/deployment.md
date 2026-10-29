@@ -60,6 +60,8 @@ PYPAY_SERVICE_ADMIN_USERNAME=admin
 PYPAY_SERVICE_ADMIN_PASSWORD=...
 PYPAY_SERVICE_VIEWER_USERNAME=viewer
 PYPAY_SERVICE_VIEWER_PASSWORD=...
+PYPAY_SERVICE_ADMIN_SESSION_SECONDS=28800
+PYPAY_SERVICE_DOCS_DIR=/opt/pypay/docs/service
 PYPAY_SERVICE_ALLOW_HTTP_URLS=0
 PYPAY_SERVICE_ALLOW_PRIVATE_URLS=0
 PYPAY_SERVICE_ENABLE_DOCS=0
@@ -84,6 +86,8 @@ PYPAY_ALIPAY_RETURN_URL=https://pay.example.com/pay/return/alipay
 > 支付宝的 `RETURN_URL` 会被服务按订单覆盖为 `/pay/{token}/return/alipay`；配置里的值只需是合法绝对地址，用于满足渠道配置校验。
 
 密钥文件权限建议 `0600`，目录 `0700`。
+
+`PYPAY_SERVICE_DOCS_DIR` 指向管理后台“文档”页读取的 Markdown 目录；把仓库的 `docs/service` 挂载到该路径即可，新增 `.md` 文件无需重启。`.[service]` 已包含 Markdown 渲染依赖。
 
 ## 4. 迁移
 

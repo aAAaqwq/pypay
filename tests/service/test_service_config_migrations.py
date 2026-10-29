@@ -128,3 +128,31 @@ def test_down_migration_is_reversible_with_data_loss(tmp_path) -> None:
     database.migrate_down(1)
     with pytest.raises(sqlite3.OperationalError), database.read() as conn:
         conn.execute("SELECT * FROM projects").fetchall()
+
+
+def test_config_parses_admin_session_and_docs_dir(tmp_path) -> None:
+    docs = tmp_path / "docs"
+    config = ServiceConfig.from_env(
+        base_env(
+            PYPAY_SERVICE_ADMIN_SESSION_SECONDS="1200",
+            PYPAY_SERVICE_DOCS_DIR=str(docs),
+        )
+    )
+    assert config.admin_session_seconds == 1200
+    assert config.service_docs_dir == docs
+
+    with pytest.raises(ServiceConfigError):
+        ServiceConfig.from_env(base_env(PYPAY_SERVICE_ADMIN_SESSION_SECONDS="30"))
+
+
+def test_secure_cookie_flag_follows_public_url_and_can_be_overridden(tmp_path) -> None:
+    base = {
+        "database_path": tmp_path / "cookies.db",
+        "public_base_url": "https://pay.test",
+        "master_key": b"k" * 32,
+        "admin_username": "admin",
+        "admin_password": "password123",
+    }
+    assert ServiceConfig(**base).secure_cookies is True
+    assert ServiceConfig(**{**base, "public_base_url": "http://pay.test"}).secure_cookies is False
+    assert ServiceConfig(**{**base, "secure_cookies": False}).secure_cookies is False

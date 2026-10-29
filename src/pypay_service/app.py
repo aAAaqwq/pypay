@@ -6,7 +6,8 @@ from collections.abc import Callable, Mapping
 from datetime import datetime
 
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from pypay import (
     PaymentError,
@@ -134,6 +135,24 @@ def create_app(
         csp = _ALIPAY_CSP if request.url.path.endswith("/alipay-form") else _DEFAULT_CSP
         response.headers["Content-Security-Policy"] = csp.format(nonce=nonce)
         return response
+
+    @app.exception_handler(StarletteHTTPException)
+    async def http_exception_handler(
+        request: Request, exc: StarletteHTTPException
+    ) -> JSONResponse | RedirectResponse:
+        if (
+            exc.status_code == 401
+            and request.method in {"GET", "HEAD"}
+            and request.url.path.startswith("/admin")
+            and request.url.path != "/admin/login"
+            and "text/html" in request.headers.get("accept", "")
+        ):
+            return RedirectResponse("/admin/login", status_code=303)
+        return JSONResponse(
+            {"detail": exc.detail},
+            status_code=exc.status_code,
+            headers=exc.headers,
+        )
 
     @app.exception_handler(ServiceError)
     async def service_error_handler(request: Request, exc: ServiceError) -> JSONResponse:

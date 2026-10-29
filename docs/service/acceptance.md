@@ -15,7 +15,7 @@
 
 ```text
 $ .venv/bin/python -m pytest
-279 passed, 1 warning in 6.01s
+286 passed, 1 warning in 6.37s
 
 $ .venv/bin/ruff check src tests examples
 All checks passed!
@@ -31,7 +31,7 @@ $ .venv/bin/ruff format --check src tests examples
 | 范围 | 数量（含参数化） | 说明 |
 | --- | --- | --- |
 | 原有 `pypay` 库与 demo 回归 | 191 | 微信/支付宝适配器、配置、模型、金额、FastAPI demo、端到端、异步客户端 |
-| 新 `pypay_service` | 88 | 订单、认证、回调、outbox、退款、worker、管理台、客户端、迁移、安全、真实适配器 E2E、通知接收示例 |
+| 新 `pypay_service` | 95 | 订单、认证、回调、outbox、退款、worker、管理台、客户端、迁移、安全、真实适配器 E2E、通知接收示例 |
 
 ## 3. 验收矩阵
 
@@ -60,6 +60,8 @@ $ .venv/bin/ruff format --check src tests examples
 | 收银台 token/CSRF/金额不可篡改 | `test_cashier_rejects_unknown_token_and_bad_csrf`、`test_cashier_never_accepts_an_amount_parameter`、`test_cashier_form_token_is_bound_to_the_token` | 通过 |
 | 收银台“已支付待确认/已确认” | `test_cashier_shows_service_pending_then_acked`、`test_paid_cashier_does_not_keep_a_live_countdown` | 通过 |
 | 管理台认证/角色/CSRF | `test_admin_requires_basic_auth`、`test_viewer_can_read_but_not_write`、`test_admin_post_requires_csrf`、`test_viewer_cannot_refund` | 通过 |
+| 登录页/会话/退出 | `test_html_login_sets_session_and_logout_clears_it`、`test_login_rejects_missing_csrf_and_tampered_session`、`test_admin_session_is_signed_expires_and_follows_credentials`、`test_viewer_session_can_read_but_not_write` | 通过 |
+| 文档自动发现与渲染 | `test_docs_are_discovered_rendered_and_auto_extended`、`test_config_parses_admin_session_and_docs_dir` | 通过 |
 | 管理台项目/渠道/订单/人工操作 | `test_admin_can_create_update_rotate_and_disable_a_project`、`test_admin_can_manage_channel_accounts`、`test_admin_order_pages_and_manual_actions`、`test_dashboard_shows_dead_events` | 通过 |
 | SSRF/密钥加密/基础 URL 校验 | `test_outbound_url_rejects_private_hosts_and_bad_schemes`、`test_dns_resolution_rejects_private_answers`、`test_secret_box_round_trip_and_wrong_key`、`test_service_base_url_must_be_root_https_or_http` | 通过 |
 | 可回滚迁移 | `test_migrations_apply_and_roll_back`、`test_down_migration_is_reversible_with_data_loss` | 通过 |
@@ -96,6 +98,8 @@ $ .venv/bin/ruff format --check src tests examples
 | 收银台（320px） | 最小宽度下无横向溢出、渠道按钮和金额完整 | 正常 |
 | 收银台（已支付） | “支付成功，服务已确认”、返回网站按钮、业务确认状态 | 正常 |
 | 管理台总览 | 项目数、待支付/已支付订单数、死信数、最近订单、问题通知 | 正常 |
+| 登录页（1440px / 390px） | 品牌区、表单、错误提示、移动端单列布局、无横向溢出 | 正常 |
+| 文档页 | 自动导航、README 渲染、表格、代码块、相对链接改写、退出按钮 | 正常 |
 | 订单详情 | 快照、attempt、退款、事件/投递、重发入口 | 正常 |
 
 验证中发现并修复：已支付订单仍显示倒计时，且到期后会反复自动刷新。现在只有 `pending` 订单渲染倒计时；终态订单显示静态有效期，轮询仍继续以更新业务确认状态。新增 `test_paid_cashier_does_not_keep_a_live_countdown` 防回归。

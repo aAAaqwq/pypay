@@ -294,3 +294,124 @@ def test_dashboard_shows_dead_events(env) -> None:
     assert "死信通知" in page.text
     assert "payment.succeeded" in page.text
     assert order["payment_id"]
+
+
+def test_html_login_sets_session_and_logout_clears_it(env) -> None:
+    client = env.clients["anon"]
+    page = client.get("/admin/login")
+    assert page.status_code == 200
+    assert "登录管理台" in page.text
+    csrf = client.cookies["pypay_admin_csrf"]
+
+    rejected = client.post(
+        "/admin/login",
+        data={"username": "admin", "password": "wrong-password", "csrf_token": csrf},
+        follow_redirects=False,
+    )
+    assert rejected.status_code == 401
+    assert "账号或密码不正确" in rejected.text
+
+    accepted = client.post(
+        "/admin/login",
+        data={"username": "admin", "password": "admin-password", "csrf_token": csrf},
+        follow_redirects=False,
+    )
+    assert accepted.status_code == 303
+    assert accepted.headers["location"] == "/admin"
+    assert client.cookies["pypay_admin_session"]
+
+    dashboard = client.get("/admin")
+    assert dashboard.status_code == 200
+    assert "admin · admin" in dashboard.text
+
+    logout = client.post(
+        "/admin/logout",
+        data={"csrf_token": client.cookies["pypay_admin_csrf"]},
+        follow_redirects=False,
+    )
+    assert logout.status_code == 303
+    assert logout.headers["location"] == "/admin/login"
+    assert "pypay_admin_session" not in client.cookies
+
+    redirected = client.get("/admin", headers={"accept": "text/html"}, follow_redirects=False)
+    assert redirected.status_code == 303
+    assert redirected.headers["location"] == "/admin/login"
+
+
+def test_login_rejects_missing_csrf_and_tampered_session(env) -> None:
+    client = env.clients["anon"]
+    response = client.post(
+        "/admin/login",
+        data={"username": "admin", "password": "admin-password"},
+        follow_redirects=False,
+    )
+    assert response.status_code == 403
+
+    client.cookies.set("pypay_admin_session", "v1.not-a-real-session.invalid")
+    redirect = client.get("/admin", headers={"accept": "text/html"}, follow_redirects=False)
+    assert redirect.status_code == 303
+    assert redirect.headers["location"] == "/admin/login"
+
+
+def test_docs_are_discovered_rendered_and_auto_extended(tmp_path) -> None:
+    docs = tmp_path / "docs"
+    (docs / "ops").mkdir(parents=True)
+    (docs / "README.md").write_text(
+        "# 文档首页\n\n见 [部署说明](deployment.md)。\n\n"
+        "| 项目 | 说明 |\n| --- | --- |\n| pypay | 支付 |\n",
+        encoding="utf-8",
+    )
+    (docs / "deployment.md").write_text("# 部署说明\n\n运行 `pytest`。\n", encoding="utf-8")
+    (docs / "ops" / "runbook.md").write_text("# 运维手册\n\n排障步骤。\n", encoding="utf-8")
+    env = build_env(tmp_path / "env", service_docs_dir=docs)
+    client = env.clients["admin"]
+
+    index = client.get("/admin/docs", auth=ADMIN)
+    assert index.status_code == 200
+    assert "文档首页" in index.text
+    assert "运维手册" in index.text
+
+    readme = client.get("/admin/docs/README", auth=ADMIN)
+    assert readme.status_code == 200
+    assert "<h1>文档首页</h1>" in readme.text
+    assert 'href="/admin/docs/deployment"' in readme.text
+    assert "<table>" in readme.text
+
+    nested = client.get("/admin/docs/ops/runbook", auth=ADMIN)
+    assert nested.status_code == 200
+    assert "排障步骤" in nested.text
+
+    (docs / "new-guide.md").write_text("# 新接入文档\n\n无需改代码。\n", encoding="utf-8")
+    refreshed = client.get("/admin/docs", auth=ADMIN)
+    assert "新接入文档" in refreshed.text
+
+    traversal = client.get("/admin/docs/..%2Fpyproject.toml", auth=ADMIN)
+    assert traversal.status_code == 404
+
+
+def test_viewer_session_can_read_but_not_write(env) -> None:
+    client = env.clients["anon"]
+    client.get("/admin/login")
+    csrf = client.cookies["pypay_admin_csrf"]
+    login = client.post(
+        "/admin/login",
+        data={"username": "viewer", "password": "viewer-password", "csrf_token": csrf},
+        follow_redirects=False,
+    )
+    assert login.status_code == 303
+    page = client.get("/admin")
+    assert page.status_code == 200
+    assert "viewer · viewer" in page.text
+
+    write = client.post(
+        "/admin/channels",
+        data={
+            "csrf_token": client.cookies["pypay_admin_csrf"],
+            "account_id": "wechat-session-viewer",
+            "channel": "wechat",
+            "name": "只读测试",
+            "env_prefix": "PYPAY_WECHAT_VIEWER_",
+        },
+        follow_redirects=False,
+    )
+    assert write.status_code == 403
