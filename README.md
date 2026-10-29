@@ -8,6 +8,14 @@
 
 核心模块不依赖具体网站、用户表、会员或额度业务，也不依赖 FastAPI 或数据库。支付 SDK 的同步调用在异步客户端中通过 `asyncio.to_thread()` 放到工作线程，避免阻塞事件循环。
 
+在此之上提供 `src/pypay_service/`：面向多个业务网站的统一支付服务，包含项目/凭证管理、统一下单、动态收银台、渠道回调、退款、签名 webhook、outbox 重试和独立 worker。业务网站只通过服务端 HMAC API 接入，浏览器不接触商户密钥。原有 `pypay` 库 API 保持兼容。
+
+- 服务文档入口：[`docs/service/README.md`](docs/service/README.md)
+- 网站接入：[`docs/service/integration.md`](docs/service/integration.md)
+- 部署与回滚：[`docs/service/deployment.md`](docs/service/deployment.md)
+- 旧回调迁移：[`docs/service/migration.md`](docs/service/migration.md)
+- 验收与未完成联调：[`docs/service/acceptance.md`](docs/service/acceptance.md)
+
 ## 目录
 
 ```text
@@ -21,8 +29,13 @@ src/pypay/
 └── channels/
     ├── wechat.py      # 微信 APIv3 Native（公钥模式）
     └── alipay.py      # 支付宝电脑网站支付
+src/pypay_service/     # 多项目统一支付服务（FastAPI + SQLite + worker）
+docs/service/          # 启动、接入、API、部署、迁移、验收文档
 examples/
 ├── fastapi_app.py     # 下单、回调、查单补偿、前端验证台
+├── service_demo.py    # 无真实渠道的统一支付服务本地演示
+├── service_client.py  # 业务侧最小客户端
+├── business_receiver.py # 可复制的业务通知接收示例
 ├── demo_gateway.py    # 无商户凭据时的内存演示网关
 ├── static/index.html  # 无构建步骤的本地验证页面
 ├── db.py              # SQLite + 唯一约束 + 事务幂等
@@ -41,6 +54,9 @@ uv pip install -e ".[examples,dev]"
 # 或 pip
 python -m venv .venv
 .venv/bin/pip install -e ".[examples,dev]"
+
+# 统一支付服务
+uv pip install -e ".[service,dev]"
 ```
 
 运行要求：Python 3.10+。
@@ -473,6 +489,8 @@ uv run --env-file .env uvicorn --factory examples.fastapi_app:create_app --reloa
 
 ### 方式 B：把示例升级成可接入的独立支付服务
 
+> 该方式已在 `src/pypay_service/` 实现，完整文档见 [`docs/service/README.md`](docs/service/README.md)。下面保留最初的设计说明，便于理解取舍。
+
 目标：接入方只通过稳定的 HTTP API 和 webhook 对接，不接触 pypay、商户密钥或微信/支付宝回调。收银页只是这套服务的一个前端。
 
 #### 1. 角色与边界
@@ -585,7 +603,7 @@ uv run --env-file .env uvicorn --factory examples.fastapi_app:create_app --reloa
 
 1. 申请 `merchant_id` / HMAC 密钥，配置自己的 webhook 地址。
 2. 创建支付时传业务单号、金额和 `Idempotency-Key`。
-3. 把收银页嵌入或跳转给用户；不要在前端计算或修改金额。
+3. 把收银页链接交给用户整页跳转（安全头禁止 iframe 嵌入）；不要在前端计算或修改金额。
 4. 验签 webhook，按 `event_id` 去重，成功后返回 `2xx`。
 5. 提供查询兜底：webhook 丢失时按 `payment_id` 或业务单号主动查单。
 6. 发货/开额度必须幂等，不能因为重复 webhook 重复发放。

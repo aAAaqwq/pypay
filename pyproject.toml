@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pypay"
-version = "0.1.0"
+version = "0.2.0"
 description = "Unified WeChat Pay APIv3 Native and Alipay PC web payment client"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -30,6 +30,7 @@ dependencies = [
 
 [project.optional-dependencies]
 examples = ["fastapi>=0.110", "uvicorn>=0.29", "segno>=1.6"]
+service = ["fastapi>=0.110", "uvicorn>=0.29", "httpx>=0.27", "segno>=1.6"]
 dev = [
   "pytest>=8",
   "pytest-asyncio>=0.23",
@@ -37,6 +38,7 @@ dev = [
   "pytest-cov>=5",
   "ruff>=0.5",
   "fastapi>=0.110",
+  "uvicorn>=0.29",
   "segno>=1.6",
 ]
 
@@ -45,6 +47,7 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 pypay = ["py.typed"]
+pypay_service = ["py.typed", "migrations/*.sql"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -59,3 +62,7 @@ branch = true
 [tool.ruff]
 line-length = 100
 target-version = "py310"
+
+[tool.ruff.lint]
+# FastAPI uses Depends(...) in defaults by design; typing.Self is not in Python 3.10.
+ignore = ["B008", "PYI034"]

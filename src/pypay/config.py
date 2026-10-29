@@ -172,8 +172,13 @@ class WeChatPayConfig:
         object.__setattr__(self, "timeout", _require_positive_timeout(self.timeout, "timeout"))
 
     @classmethod
-    def from_env(cls, environ: Mapping[str, str] | None = None) -> "WeChatPayConfig":
-        env = _EnvReader(os.environ if environ is None else environ, "PYPAY_WECHAT_")
+    def from_env(
+        cls,
+        environ: Mapping[str, str] | None = None,
+        *,
+        prefix: str = "PYPAY_WECHAT_",
+    ) -> "WeChatPayConfig":
+        env = _EnvReader(os.environ if environ is None else environ, prefix)
         values = {
             "mchid": env.required("MCHID"),
             "appid": env.required("APPID"),
@@ -189,7 +194,7 @@ class WeChatPayConfig:
         try:
             timeout = float(timeout_raw)
         except (TypeError, ValueError) as exc:
-            raise PaymentConfigError("PYPAY_WECHAT_TIMEOUT must be a number") from exc
+            raise PaymentConfigError(f"{prefix}TIMEOUT must be a number") from exc
         return cls(timeout=timeout, **values)  # type: ignore[arg-type]
 
 
@@ -218,8 +223,13 @@ class AlipayConfig:
         object.__setattr__(self, "timeout", _require_positive_timeout(self.timeout, "timeout"))
 
     @classmethod
-    def from_env(cls, environ: Mapping[str, str] | None = None) -> "AlipayConfig":
-        env = _EnvReader(os.environ if environ is None else environ, "PYPAY_ALIPAY_")
+    def from_env(
+        cls,
+        environ: Mapping[str, str] | None = None,
+        *,
+        prefix: str = "PYPAY_ALIPAY_",
+    ) -> "AlipayConfig":
+        env = _EnvReader(os.environ if environ is None else environ, prefix)
         values = {
             "appid": env.required("APPID"),
             "notify_url": env.required("NOTIFY_URL"),
@@ -234,7 +244,7 @@ class AlipayConfig:
         try:
             timeout = float(timeout_raw)
         except (TypeError, ValueError) as exc:
-            raise PaymentConfigError("PYPAY_ALIPAY_TIMEOUT must be a number") from exc
+            raise PaymentConfigError(f"{prefix}TIMEOUT must be a number") from exc
         return cls(gateway=gateway, seller_id=seller_id, timeout=timeout, **values)  # type: ignore[arg-type]
 
 

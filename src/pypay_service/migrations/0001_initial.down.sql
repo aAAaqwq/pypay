@@ -1,0 +1,11 @@
+DROP TABLE IF EXISTS audit_logs;
+DROP TABLE IF EXISTS api_nonces;
+DROP TABLE IF EXISTS outbox_deliveries;
+DROP TABLE IF EXISTS outbox_events;
+DROP TABLE IF EXISTS channel_notifications;
+DROP TABLE IF EXISTS refunds;
+DROP TABLE IF EXISTS payment_attempts;
+DROP TABLE IF EXISTS payment_orders;
+DROP TABLE IF EXISTS project_channels;
+DROP TABLE IF EXISTS channel_accounts;
+DROP TABLE IF EXISTS projects;
