@@ -259,6 +259,7 @@ pending ──支付成功──► paid ──累计退款=全额──► refu
 
 - [API 与事件契约](api.md)
 - [网站接入指南](integration.md)
+- [外部站点接入说明（对外交付版）](external-integration.md)
 - [部署、运维与回滚](deployment.md)
 - [旧回调迁移方案](migration.md)
 - [验收与未完成联调](acceptance.md)
